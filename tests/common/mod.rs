@@ -85,12 +85,17 @@ fn rand_u32() -> u32 {
 
 impl Hbbs {
     pub async fn start(envs: &[(&str, &str)], args: &[&str]) -> Hbbs {
+        Self::start_bin(env!("CARGO_BIN_EXE_hbbs"), envs, args).await
+    }
+
+    /// Starts another hbbs binary, e.g. the original one for differential tests.
+    pub async fn start_bin(bin: &str, envs: &[(&str, &str)], args: &[&str]) -> Hbbs {
         sodiumoxide::init().ok();
         for _ in 0..20 {
             let (port, port_lock) = free_port();
             let dir = tempfile::tempdir().unwrap();
             let log = std::fs::File::create(dir.path().join("hbbs.log")).unwrap();
-            let mut cmd = Command::new(env!("CARGO_BIN_EXE_hbbs"));
+            let mut cmd = Command::new(bin);
             cmd.current_dir(dir.path())
                 .arg("-p")
                 .arg(port.to_string())
