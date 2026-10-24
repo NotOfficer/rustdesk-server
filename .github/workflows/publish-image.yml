@@ -1,0 +1,77 @@
+# Builds docker-classic/Dockerfile.multistage from the branch picked under
+# "Run workflow" and publishes it to the GitHub Container Registry:
+#   ghcr.io/<owner>/<repo>:<branch>     e.g. ghcr.io/notofficer/rustdesk-server:feature-modern-transports
+#   ghcr.io/<owner>/<repo>:sha-<commit>
+#   ghcr.io/<owner>/<repo>:<extra tag>  only if given, e.g. latest
+# Uses the workflow's own GITHUB_TOKEN, no secrets needed. GitHub only offers
+# "Run workflow" for workflows that also exist on the default branch.
+name: publish image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag, e.g. latest (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # image names must be lowercase, the owner name is not
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker-classic/Dockerfile.multistage
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: CARGO_BUILD_JOBS=4
+          cache-from: type=gha,scope=publish-image
+          cache-to: type=gha,mode=max,scope=publish-image
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published"
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
