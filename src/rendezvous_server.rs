@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::key_exchange;
 use crate::peer::*;
-use crate::punch::{self, PunchRoutes, RateLimiter, TcpHosts};
+use crate::punch::{self, Ice, PunchRoutes, RateLimiter, TcpHosts};
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -638,7 +638,8 @@ impl RendezvousServer {
                     if !self.answer_allowed(&rr.webrtc_sdp_answer, addr_b, rr.id()) {
                         rr.webrtc_sdp_answer.clear();
                     }
-                    self.note_peer_version(rr.id(), &rr.version, addr).await;
+                    self.note_peer_version(rr.id(), &rr.version, addr, addr_b, ws)
+                        .await;
                     let id = rr.id();
                     if !id.is_empty() {
                         let pk = self.get_pk(&rr.version, id.to_owned()).await;
@@ -657,9 +658,15 @@ impl RendezvousServer {
                     allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
                 }
                 Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
+                    let ctl = decode_or_unspecified(&phs.socket_addr);
+                    self.note_peer_version(&phs.id, &phs.version, addr, ctl, ws)
+                        .await;
                     allow_err!(self.handle_hole_sent(phs, addr, None).await);
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
+                    let ctl = decode_or_unspecified(&la.socket_addr);
+                    self.note_peer_version(&la.id, &la.version, addr, ctl, ws)
+                        .await;
                     allow_err!(self.handle_local_addr(la, addr, None).await);
                 }
                 Some(rendezvous_message::Union::TestNatRequest(tar)) => {
@@ -756,7 +763,6 @@ impl RendezvousServer {
             &addr_a,
             &addr
         );
-        self.note_peer_version(&phs.id, &phs.version, addr).await;
         let mut msg_out = RendezvousMessage::new();
         let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
             phs.webrtc_sdp_answer
@@ -796,7 +802,8 @@ impl RendezvousServer {
             log::debug!("Ignored UDP punch hole sent from {:?}", addr);
             return;
         };
-        self.note_peer_version(&phs.id, &phs.version, addr).await;
+        self.note_peer_version(&phs.id, &phs.version, addr, addr_a, false)
+            .await;
         // From another host than the peer registered from (NAT pools, multi-WAN,
         // or forged): still answer, so the answer and the relay fallback work, but
         // the controller must not punch that address.
@@ -843,7 +850,6 @@ impl RendezvousServer {
             &addr_a,
             &addr
         );
-        self.note_peer_version(&la.id, &la.version, addr).await;
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
             socket_addr: la.local_addr.clone(),
@@ -1137,9 +1143,20 @@ impl RendezvousServer {
     }
 
     // Remembers whether the controlled peer `id` runs a client older than 1.5.0,
-    // from a reply it sent from the host it registered from.
-    async fn note_peer_version(&self, id: &str, version: &str, sender: SocketAddr) {
-        if id.is_empty() || version.is_empty() {
+    // from a reply to a waiting controller `ctl` that it sent from the host it
+    // registered from. Not over WebSocket, whose address can come from a header.
+    async fn note_peer_version(
+        &self,
+        id: &str,
+        version: &str,
+        sender: SocketAddr,
+        ctl: SocketAddr,
+        ws: bool,
+    ) {
+        if ws || id.is_empty() || version.is_empty() {
+            return;
+        }
+        if !self.tcp_punch.lock().await.contains_key(&try_into_v4(ctl)) {
             return;
         }
         if let Some(peer) = self.pm.get_in_memory(id).await {
@@ -1186,24 +1203,39 @@ impl RendezvousServer {
             });
             msg_out
         };
+        // over the route's budget: dropped quietly; only candidates without a
+        // matching route count as misses, which close the connection
+        let mut over_budget = false;
         if valid && ice.socket_addr.is_empty() {
-            if self.routes.ice_to_peer(addr, &ice.id, &ice.session_key) {
-                if let Some(peer) = self.pm.get_in_memory(&ice.id).await {
-                    let peer_addr = peer.read().await.socket_addr;
-                    self.tx.send(Data::Msg(forward(ice).into(), peer_addr)).ok();
-                    return true;
-                }
-            }
-        } else if valid {
-            if let Some(ctl) = punch::decode_addr(&ice.socket_addr) {
-                if self.routes.ice_to_controller(ctl, &ice.session_key) {
-                    let sink = self.tcp_punch.lock().await.get(&try_into_v4(ctl)).cloned();
-                    if sink.is_some() {
-                        Self::send_to_shared_sink(sink, forward(ice)).await;
+            match self.routes.ice_to_peer(addr, &ice.id, &ice.session_key) {
+                Ice::Forward => {
+                    if let Some(peer) = self.pm.get_in_memory(&ice.id).await {
+                        let peer_addr = peer.read().await.socket_addr;
+                        self.tx.send(Data::Msg(forward(ice).into(), peer_addr)).ok();
                         return true;
                     }
                 }
+                Ice::OverBudget => over_budget = true,
+                Ice::NoMatch => {}
             }
+        } else if valid {
+            if let Some(ctl) = punch::decode_addr(&ice.socket_addr) {
+                match self.routes.ice_to_controller(ctl, &ice.session_key) {
+                    Ice::Forward => {
+                        let sink = self.tcp_punch.lock().await.get(&try_into_v4(ctl)).cloned();
+                        if sink.is_some() {
+                            Self::send_to_shared_sink(sink, forward(ice)).await;
+                            return true;
+                        }
+                    }
+                    Ice::OverBudget => over_budget = true,
+                    Ice::NoMatch => {}
+                }
+            }
+        }
+        if over_budget {
+            log::debug!("IceCandidate over the route's budget from {:?}", addr);
+            return true;
         }
         count.misses += 1;
         log::debug!("Dropped IceCandidate ({} bytes) from {:?}", len, addr);

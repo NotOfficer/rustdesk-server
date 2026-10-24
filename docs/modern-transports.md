@@ -369,8 +369,8 @@ be abused to make a peer send packets to a third host:
 | State | Bound |
 |---|---|
 | Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route. When the table is full, a newcomer takes the oldest route of the source with clearly the most routes, so one heavy user cannot lock out the others |
-| ICE per route | 128 candidates per direction |
-| ICE frames per connection | 256; a connection with more than 16 unmatched candidates is closed |
+| ICE per route | 128 candidates per direction (the controller sends each candidate twice, so 64 distinct ones); more are dropped quietly |
+| ICE frames per connection | 256; a connection with more than 16 candidates that match no route or session is closed |
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
@@ -411,7 +411,7 @@ be abused to make a peer send packets to a third host:
 | Client | Effect |
 |---|---|
 | 1.5.0 | all four features work when the controller enables them |
-| 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: once it has replied with its version (any `PunchHoleSent`, `LocalAddr` or `RelayResponse` from its registered host), hbbs remembers it in memory and sends it no `udp_port` and no IPv6 address, so it does its TCP punch as with the original server. Only before its first reply after a server start can it get them; it then punches UDP with probes 1.5.0 does not answer (`RDP?`/`RDP!` came with 1.5.0), that round ends on the relay after ~3 s, and the controller's parallel TCP round usually wins first. WebRTC offers are ignored by it; the controller falls back. |
+| 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: once it has replied with its version (a `PunchHoleSent`, `LocalAddr` or `RelayResponse` to a waiting controller, sent from its registered host over plain TCP or a claimed UDP route; never over WebSocket, whose address can come from a header), hbbs remembers it in memory and sends it no `udp_port` and no IPv6 address, so it does its TCP punch as with the original server. Only before its first reply after a server start can it get them; it then punches UDP with probes 1.5.0 does not answer (`RDP?`/`RDP!` came with 1.5.0), that round ends on the relay after ~3 s, and the controller's parallel TCP round usually wins first. WebRTC offers are ignored by it; the controller falls back. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
 | all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |

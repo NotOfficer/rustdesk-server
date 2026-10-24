@@ -533,3 +533,21 @@ async fn a_kept_connection_serves_one_response() {
     send_ice_from_peer(&mut ice_conn, &ph.socket_addr, FP, CANDIDATE).await;
     assert!(ctl.expect(3000, pick_ice).await.is_some());
 }
+
+// More candidates than the route's budget are dropped quietly; they do not
+// count as misses and do not close the controller's signalling connection.
+#[tokio::test]
+async fn over_budget_candidates_keep_the_connection() {
+    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    for i in 0..160 {
+        send_ice_from_controller(&mut ctl, "peer01", FP, &format!("c{}", i)).await;
+    }
+    let mut ice_conn = ice_connection(&hbbs).await;
+    for i in 0..160 {
+        send_ice_from_peer(&mut ice_conn, &ph.socket_addr, FP, &format!("c{}", i)).await;
+    }
+    while ctl.expect(300, pick_ice).await.is_some() {}
+    while peer.expect(300, pick_ice).await.is_some() {}
+    assert!(!ctl.closed_within(500).await);
+    assert!(!ice_conn.closed_within(100).await);
+}

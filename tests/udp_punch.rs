@@ -564,3 +564,49 @@ async fn legacy_controlled_side_gets_no_udp_port_after_its_reply() {
     assert_eq!(ph.udp_port, 40000);
     assert!(!ph.socket_addr_v6.is_empty());
 }
+
+// The legacy mark comes only from a reply to a waiting controller, over plain
+// TCP or a claimed UDP route: not over WebSocket (address from a header) and
+// not without a pending request.
+#[tokio::test]
+async fn forged_replies_do_not_mark_a_peer_legacy() {
+    use hbb_common::futures_util::SinkExt;
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let old_reply = |socket_addr: Bytes| {
+        msg(|m| {
+            m.set_punch_hole_sent(PunchHoleSent {
+                socket_addr,
+                id: "peer01".to_owned(),
+                version: "1.4.0".to_owned(),
+                ..Default::default()
+            })
+        })
+        .write_to_bytes()
+        .unwrap()
+    };
+    // a waiting controller
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    let mut req = punch_hole_request("peer01", &hbbs.key);
+    req.udp_port = 40000;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req.clone()))).await;
+    let ph = peer.expect(5000, pick_punch_hole).await.unwrap();
+    // over WebSocket, claiming the peer's address in a header
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(
+        format!("ws://{}", hbbs.ws_addr()),
+    )
+    .unwrap();
+    request.headers_mut().insert("X-Real-IP", PEER_IP.to_string().parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(tungstenite::Message::Binary(old_reply(ph.socket_addr.clone())))
+        .await
+        .unwrap();
+    // over TCP from the peer's host, but for no waiting controller
+    let mut tcp = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    tcp.send_raw(old_reply(mangle("127.0.0.9:4000".parse().unwrap()))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut ctl2 = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    ctl2.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    assert_eq!(peer.expect(5000, pick_punch_hole).await.unwrap().udp_port, 40000);
+    drop(ctl);
+}

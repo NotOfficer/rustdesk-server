@@ -213,3 +213,9 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   memory only, the database is unchanged) and then withholds `udp_port` and
   IPv6 from it. The first connection to such a peer after a server start
   can still take the UDP detour (the controller's TCP round usually wins).
+- **Round 8 fixes are not independently reviewed** (FINAL-8-1, FINAL-8-2):
+  the review loop stops after 8 rounds. The legacy mark is now learned only
+  from replies to a waiting controller over plain TCP or a claimed UDP route
+  (not WebSocket), and ICE candidates over a route's budget no longer count
+  as misses. Both come with regression tests and passed all three test
+  levels.

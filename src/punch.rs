@@ -72,6 +72,16 @@ impl Route {
     }
 }
 
+/// What happens to an ICE candidate.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Ice {
+    Forward,
+    // the route's budget for this direction is used up: dropped quietly
+    OverBudget,
+    // no live route, other peer or other session
+    NoMatch,
+}
+
 /// What a PunchHoleRequest may forward.
 #[derive(Default, Debug, PartialEq)]
 pub(crate) struct Grant {
@@ -295,12 +305,12 @@ impl PunchRoutes {
     }
 
     /// Counts a candidate from the controller on connection `ctl` for `peer_id`.
-    pub(crate) fn ice_to_peer(&self, ctl: SocketAddr, peer_id: &str, session_key: &str) -> bool {
+    pub(crate) fn ice_to_peer(&self, ctl: SocketAddr, peer_id: &str, session_key: &str) -> Ice {
         self.ice_at(Instant::now(), ctl, Some(peer_id), session_key)
     }
 
     /// Counts a candidate from the controlled side for controller connection `ctl`.
-    pub(crate) fn ice_to_controller(&self, ctl: SocketAddr, session_key: &str) -> bool {
+    pub(crate) fn ice_to_controller(&self, ctl: SocketAddr, session_key: &str) -> Ice {
         self.ice_at(Instant::now(), ctl, None, session_key)
     }
 
@@ -310,19 +320,19 @@ impl PunchRoutes {
         ctl: SocketAddr,
         to_peer: Option<&str>,
         session_key: &str,
-    ) -> bool {
+    ) -> Ice {
         let mut map = self.lock();
         let Some(r) = map.get_mut(&try_into_v4(ctl)) else {
-            return false;
+            return Ice::NoMatch;
         };
         if !r.alive(now) || to_peer.map(|id| id != r.peer_id).unwrap_or(false) {
-            return false;
+            return Ice::NoMatch;
         }
         let Some(w) = r.webrtc.as_mut() else {
-            return false;
+            return Ice::NoMatch;
         };
         if w.session_key != session_key {
-            return false;
+            return Ice::NoMatch;
         }
         let n = if to_peer.is_some() {
             &mut w.to_peer
@@ -330,10 +340,10 @@ impl PunchRoutes {
             &mut w.to_controller
         };
         if *n >= MAX_ICE_PER_DIRECTION {
-            return false;
+            return Ice::OverBudget;
         }
         *n += 1;
-        true
+        Ice::Forward
     }
 
     /// Accepts the first UDP PunchHoleSent from `peer_id` for the route of
@@ -771,18 +781,18 @@ mod tests {
     fn ice_needs_the_session_key_and_has_a_budget() {
         let routes = PunchRoutes::default();
         routes.open(ctl(1), "peer01", peer_ip(), false, Some(FP.to_owned()));
-        assert!(!routes.ice_to_peer(ctl(1), "peer01", "sha-256 00"));
-        assert!(!routes.ice_to_peer(ctl(1), "peer02", FP));
-        assert!(!routes.ice_to_controller(ctl(2), FP));
+        assert_eq!(routes.ice_to_peer(ctl(1), "peer01", "sha-256 00"), Ice::NoMatch);
+        assert_eq!(routes.ice_to_peer(ctl(1), "peer02", FP), Ice::NoMatch);
+        assert_eq!(routes.ice_to_controller(ctl(2), FP), Ice::NoMatch);
         for _ in 0..MAX_ICE_PER_DIRECTION {
-            assert!(routes.ice_to_peer(ctl(1), "peer01", FP));
-            assert!(routes.ice_to_controller(ctl(1), FP));
+            assert_eq!(routes.ice_to_peer(ctl(1), "peer01", FP), Ice::Forward);
+            assert_eq!(routes.ice_to_controller(ctl(1), FP), Ice::Forward);
         }
-        assert!(!routes.ice_to_peer(ctl(1), "peer01", FP));
-        assert!(!routes.ice_to_controller(ctl(1), FP));
+        assert_eq!(routes.ice_to_peer(ctl(1), "peer01", FP), Ice::OverBudget);
+        assert_eq!(routes.ice_to_controller(ctl(1), FP), Ice::OverBudget);
         // a UDP-only route carries no ICE and keeps no sink
         routes.open(ctl(3), "peer01", peer_ip(), true, None);
-        assert!(!routes.ice_to_controller(ctl(3), FP));
+        assert_eq!(routes.ice_to_controller(ctl(3), FP), Ice::NoMatch);
         assert!(!routes.keeps_sink(ctl(3)));
     }
 
@@ -794,14 +804,14 @@ mod tests {
         routes.open_at(t0, ctl(2), "peer01", peer_ip(), false, Some(FP.to_owned()));
         let src = SocketAddr::new(peer_ip(), 5000);
         assert_eq!(routes.claim_udp_at(t0 + UDP_ROUTE_TTL, ctl(1), "peer01", src), None);
-        assert!(!routes.ice_at(t0 + WEBRTC_ROUTE_TTL, ctl(2), None, FP));
+        assert_eq!(routes.ice_at(t0 + WEBRTC_ROUTE_TTL, ctl(2), None, FP), Ice::NoMatch);
         // refreshing never extends a route past its lifetime
         let mut t = t0;
         while t < t0 + MAX_ROUTE_LIFETIME {
             routes.open_at(t, ctl(2), "peer01", peer_ip(), false, Some(FP.to_owned()));
             t += Duration::from_secs(10);
         }
-        assert!(!routes.ice_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), None, FP));
+        assert_eq!(routes.ice_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), None, FP), Ice::NoMatch);
         // an expired route is replaced by a new request
         let g = routes.open_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), "peer02", peer_ip(), true, None);
         assert!(g.udp);
