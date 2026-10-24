@@ -167,11 +167,14 @@ A <-udp-> B          "RDP?"/"RDP!" probes, then KCP
     out more than that by all controllers together, because the peer sends
     punch probes to whatever address it gets.
 * B opens a v6 UDP listener and reports it in `PunchHoleSent.socket_addr_v6`,
-  `LocalAddr.socket_addr_v6` or `RelayResponse.socket_addr_v6`.
+  `LocalAddr.socket_addr_v6` or `RelayResponse.socket_addr_v6`. B does this
+  only when it got A's address (1.4.9 and 1.5.0 alike).
 * hbbs copies that into `PunchHoleResponse.socket_addr_v6` or
-  `RelayResponse.socket_addr_v6`, again only global unicast with a port. A
-  starts an "IPv6" KCP attempt when the port is non-zero (client.rs:1028,
-  1049).
+  `RelayResponse.socket_addr_v6` only on the way back to a controller whose
+  own address went to B (so never past a forced relay or to a 1.4.x
+  controller), only from B's registered host, again only global unicast with
+  a port, and within the same per-target limit. A starts an "IPv6" KCP
+  attempt when the port is non-zero (client.rs:1028, 1049).
 
 ### 1.6 WebRTC
 
@@ -238,12 +241,13 @@ leaves it on and logs a warning.
 ### Punch routes
 
 A **punch route** is the server's record of one controller connection that
-asked for UDP and/or WebRTC. It is keyed by A's TCP address (the
-`tcp_punch` key) and holds:
+asked for UDP and/or WebRTC or got its IPv6 address forwarded. It is keyed by
+A's TCP address (the `tcp_punch` key) and holds:
 
 * the target peer id;
-* B's registered IP at the time of the request (for the UDP check);
+* B's registered IP at the time of the request (for the sender checks);
 * whether UDP was granted, and whether the UDP answer was already used;
+* whether A's IPv6 address went to B;
 * for WebRTC, the session key taken from the offer, how often the offer was
   forwarded, and the number of candidates forwarded in each direction;
 * whether any response from B reached A;
@@ -268,12 +272,18 @@ before.
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
 | `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; `udp_port` and v6 only from 1.5.0 controllers |
-| `PunchHoleSent` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` if it belongs to A's WebRTC route |
-| `PunchHoleSent` | UDP | if it matches an open UDP route: `PunchHoleResponse { socket_addr = observed UDP source, is_udp }` to A over TCP (`is_udp` only if it came from B's registered host); otherwise ignored |
-| `LocalAddr` | TCP | forward `socket_addr_v6` |
-| `RelayResponse` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` only if it belongs to A's WebRTC route |
+| `PunchHoleSent` | TCP | forward `socket_addr_v6` and `webrtc_sdp_answer` if A's route got them (see below) |
+| `PunchHoleSent` | UDP | if it matches an open UDP route and comes from B's registered host: `PunchHoleResponse { socket_addr = observed UDP source, is_udp: true }` to A over TCP; otherwise ignored |
+| `LocalAddr` | TCP | forward `socket_addr_v6` if A's route got it |
+| `RelayResponse` | TCP | forward `socket_addr_v6` and `webrtc_sdp_answer` if A's route got them |
 | `IceCandidate` from A | TCP (A's punch connection) | forward to B's registered UDP address if it matches A's route |
 | `IceCandidate` from B | TCP (B's ICE connection) | forward to A's punch connection if it matches the route of `socket_addr`; the connection stays open |
+
+A reply carries a WebRTC answer or an IPv6 address back only if A's route
+granted it, the reply names the route's peer id, and it comes from B's
+registered host (IPv4: equal; IPv6: same /64), never over WebSocket. Anyone
+who knows A's address can send a reply, as with the original server; such a
+reply still reaches A as before, but without these fields.
 
 WebSocket connections (21118) keep the original behavior: no key exchange, no
 new fields, no `IceCandidate` handling.
@@ -327,14 +337,16 @@ send more, or anything to a third address.
     created by a verified TCP `PunchHoleRequest` that asked for UDP;
   * the route's target id equals `PunchHoleSent.id`;
   * the route is not expired and its UDP answer has not been used (B sends 3
-    copies; only the first counts).
+    copies; only the first counts);
+  * the datagram's source IP matches B's registered IP (IPv4: equal; IPv6:
+    same /64).
 
-  Then hbbs sends one `PunchHoleResponse` to A **over A's existing TCP
-  connection**. Anything else is dropped silently. `is_udp` is only set if
-  the datagram's source IP matches B's registered IP (IPv4: equal; IPv6:
-  same /64); otherwise A gets the response (with the WebRTC answer, and a
-  relay fallback) but does not punch that address over UDP. This covers NAT
-  pools and multi-WAN routers as well as a forged source.
+  Then hbbs sends one `PunchHoleResponse` with `is_udp` to A **over A's
+  existing TCP connection**. Anything else is dropped silently and leaves the
+  route as it was, so a forged datagram cannot use up the route that B's
+  reply needs. A UDP source proves nothing, so a datagram from another host
+  (forged, or B behind a NAT pool or multi-WAN router) counts as lost: A's
+  parallel TCP round or its retries go on, as after any lost datagram.
 * UDP `PunchHoleRequest`, `LocalAddr` and `IceCandidate` stay ignored.
 * Messages hbbs sends to B over UDP (`PunchHole`, `IceCandidate`) go only to
   B's registered address. They are triggered by A's TCP connection, which
@@ -360,15 +372,16 @@ be abused to make a peer send packets to a third host:
 * ICE candidates: chosen by each side; the peer's ICE agent sends paced
   connectivity checks to them, as in any WebRTC implementation. Bounded by
   128 candidates per route and 64 routes per controller IP.
-* A forged TCP `PunchHoleSent` could carry an arbitrary `socket_addr_v6` to a
-  controller whose address it knows. hbbs only forwards a global unicast
-  address; the window is the few seconds the controller waits.
+* B's `socket_addr_v6` on the way back: A punches it. hbbs forwards it only
+  to a controller whose own address went to B, only from B's registered host,
+  and within the same per-target limit, so neither a third party that knows
+  A's address nor B itself can point many controllers at one host.
 
 ### 3.2 Bounded state
 
 | State | Bound |
 |---|---|
-| Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route. When the table is full, a newcomer takes the oldest route of the source with clearly the most routes, so one heavy user cannot lock out the others |
+| Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP or IPv6 only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route. When the table is full, a newcomer takes the oldest route of the source with clearly the most routes, so one heavy user cannot lock out the others |
 | ICE per route | 128 candidates per direction (the controller sends each candidate twice, so 64 distinct ones); more are dropped quietly |
 | ICE frames per connection | 256; a connection with more than 16 candidates that match no route or session is closed |
 | SDP offer/answer | 4096 bytes, otherwise dropped |

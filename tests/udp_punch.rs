@@ -209,21 +209,26 @@ async fn hole_sent_for_another_id_is_ignored() {
     assert_eq!(demangle(&res.socket_addr), punch.local_addr().unwrap());
 }
 
-// From another host than the peer registered from (NAT pool, multi-WAN, or
-// forged) the controller still gets the response, but not as a UDP address.
+// From another host than the peer registered from (forged, NAT pool or
+// multi-WAN) it counts as lost: it neither reaches the controller nor uses up
+// the route the peer's own reply needs.
 #[tokio::test]
-async fn hole_sent_from_another_host_is_not_punched() {
+async fn hole_sent_from_another_host_is_ignored() {
     let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
     let stranger = udp_socket("127.0.0.3".parse().unwrap()).await;
-    send_hole_sent(&stranger, &hbbs, &ph.socket_addr, "peer01", None).await;
-    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
-    assert!(!res.is_udp);
-    assert!(!res.socket_addr.is_empty());
+    send_hole_sent(&stranger, &hbbs, &ph.socket_addr, "peer01", Some(|phs| {
+        phs.socket_addr_v6 = mangle("[2001:db8::66]:4000".parse().unwrap());
+        phs.webrtc_sdp_answer = "webrtc://forged".to_owned();
+    }))
+    .await;
+    assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
     assert!(drain(&stranger, 100).await.is_empty());
-    // the route is used up
     let punch = udp_socket(PEER_IP).await;
     send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", None).await;
-    assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.is_udp);
+    assert_eq!(demangle(&res.socket_addr), punch.local_addr().unwrap());
+    assert!(res.socket_addr_v6.is_empty());
 }
 
 #[tokio::test]

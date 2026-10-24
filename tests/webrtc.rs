@@ -177,6 +177,47 @@ async fn answer_in_relay_response() {
     assert_eq!(ctl.expect(3000, pick_ice).await.unwrap().candidate, CANDIDATE);
 }
 
+// Anybody who knows the controller's address can send a reply; the answer only
+// counts from the host the peer registered from.
+#[tokio::test]
+async fn answer_only_from_the_peer_host() {
+    let stranger_ip = "127.0.0.3".parse().unwrap();
+    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let mut stranger = Tcp::connect(&hbbs, stranger_ip, Kx::V1).await;
+    stranger
+        .send(&msg(|m| {
+            m.set_punch_hole_sent(PunchHoleSent {
+                socket_addr: ph.socket_addr.clone(),
+                id: "peer01".to_owned(),
+                version: "1.5.0".to_owned(),
+                webrtc_sdp_answer: answer(),
+                ..Default::default()
+            })
+        }))
+        .await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.webrtc_sdp_answer.is_empty());
+
+    // the same in a RelayResponse
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
+    offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    let mut stranger = Tcp::connect(&hbbs, stranger_ip, Kx::V1).await;
+    let mut rr = RelayResponse {
+        socket_addr: ph.socket_addr,
+        uuid: "uuid-1".to_owned(),
+        relay_server: "relay.example:21117".to_owned(),
+        version: "1.5.0".to_owned(),
+        webrtc_sdp_answer: answer(),
+        ..Default::default()
+    };
+    rr.set_id("peer01".to_owned());
+    stranger.send(&msg(|m| m.set_relay_response(rr))).await;
+    let rr = ctl.expect(3000, pick_relay_response).await.unwrap();
+    assert!(rr.webrtc_sdp_answer.is_empty());
+    assert_eq!(rr.uuid, "uuid-1");
+}
+
 #[tokio::test]
 async fn same_intranet_offer_gets_a_punch_hole() {
     let hbbs = Hbbs::start(&[], &[]).await;

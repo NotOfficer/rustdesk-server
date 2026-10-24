@@ -630,12 +630,13 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
                     let addr_b = decode_or_unspecified(&rr.socket_addr);
                     rr.socket_addr = Default::default();
+                    let grant = self.reply_grant(addr_b, rr.id(), addr, ws);
                     rr.socket_addr_v6 = if self.relay_forced(addr, addr_b) {
                         Default::default()
                     } else {
-                        forward_v6(&rr.socket_addr_v6)
+                        self.reply_v6(&rr.socket_addr_v6, &grant)
                     };
-                    if !self.answer_allowed(&rr.webrtc_sdp_answer, addr_b, rr.id()) {
+                    if !self.answer_allowed(&rr.webrtc_sdp_answer, &grant) {
                         rr.webrtc_sdp_answer.clear();
                     }
                     self.note_peer_version(rr.id(), &rr.version, addr, addr_b, ws)
@@ -661,13 +662,13 @@ impl RendezvousServer {
                     let ctl = decode_or_unspecified(&phs.socket_addr);
                     self.note_peer_version(&phs.id, &phs.version, addr, ctl, ws)
                         .await;
-                    allow_err!(self.handle_hole_sent(phs, addr, None).await);
+                    allow_err!(self.handle_hole_sent(phs, addr, None, ws).await);
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
                     let ctl = decode_or_unspecified(&la.socket_addr);
                     self.note_peer_version(&la.id, &la.version, addr, ctl, ws)
                         .await;
-                    allow_err!(self.handle_local_addr(la, addr, None).await);
+                    allow_err!(self.handle_local_addr(la, addr, None, ws).await);
                 }
                 Some(rendezvous_message::Union::TestNatRequest(tar)) => {
                     let mut msg_out = RendezvousMessage::new();
@@ -754,6 +755,7 @@ impl RendezvousServer {
         phs: PunchHoleSent,
         addr: SocketAddr,
         socket: Option<&'a mut FramedSocket>,
+        ws: bool,
     ) -> ResultType<()> {
         // punch hole sent from B, tell A that B is ready to be connected
         let addr_a = decode_or_unspecified(&phs.socket_addr);
@@ -764,16 +766,17 @@ impl RendezvousServer {
             &addr
         );
         let mut msg_out = RendezvousMessage::new();
-        let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
+        let grant = self.reply_grant(addr_a, &phs.id, addr, ws);
+        let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, &grant) {
             phs.webrtc_sdp_answer
         } else {
             Default::default()
         };
         let mut p = PunchHoleResponse {
             socket_addr: AddrMangle::encode(addr).into(),
+            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, &grant),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
-            socket_addr_v6: forward_v6(&phs.socket_addr_v6),
             webrtc_sdp_answer,
             ..Default::default()
         };
@@ -793,38 +796,38 @@ impl RendezvousServer {
     // it punches with, so its source is the public address the controller must
     // punch. Accepted once, for an open UDP route of the controller named in
     // socket_addr and from the controlled peer's host, and answered only on the
-    // controller's TCP connection. Nothing is ever sent back over UDP.
+    // controller's TCP connection. Nothing is ever sent back over UDP. From any
+    // other host (forged, or a NAT pool or multi-WAN router) it counts as lost:
+    // the controller's parallel TCP round or its retries go on as after a lost
+    // datagram, and nobody can use up the route the peer's reply needs.
     async fn handle_udp_hole_sent(&mut self, phs: PunchHoleSent, addr: SocketAddr) {
         let Some(addr_a) = punch::decode_addr(&phs.socket_addr) else {
             return;
         };
-        let Some(from_peer) = self.routes.claim_udp(addr_a, &phs.id, addr) else {
+        if !self.routes.claim_udp(addr_a, &phs.id, addr) {
             log::debug!("Ignored UDP punch hole sent from {:?}", addr);
             return;
-        };
+        }
         self.note_peer_version(&phs.id, &phs.version, addr, addr_a, false)
             .await;
-        // From another host than the peer registered from (NAT pools, multi-WAN,
-        // or forged): still answer, so the answer and the relay fallback work, but
-        // the controller must not punch that address.
         log::debug!(
-            "UDP punch hole response to {:?} from {:?}, is_udp: {}",
+            "UDP punch hole response to {:?} from {:?}, is_udp: true",
             &addr_a,
-            &addr,
-            from_peer
+            &addr
         );
         let mut msg_out = RendezvousMessage::new();
-        let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
+        let grant = self.reply_grant(addr_a, &phs.id, addr, false);
+        let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, &grant) {
             phs.webrtc_sdp_answer
         } else {
             Default::default()
         };
         let mut p = PunchHoleResponse {
             socket_addr: AddrMangle::encode(addr).into(),
+            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, &grant),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server,
-            is_udp: from_peer,
-            socket_addr_v6: forward_v6(&phs.socket_addr_v6),
+            is_udp: true,
             webrtc_sdp_answer,
             ..Default::default()
         };
@@ -841,6 +844,7 @@ impl RendezvousServer {
         la: LocalAddr,
         addr: SocketAddr,
         socket: Option<&'a mut FramedSocket>,
+        ws: bool,
     ) -> ResultType<()> {
         // relay local addrs of B to A
         let addr_a = decode_or_unspecified(&la.socket_addr);
@@ -851,11 +855,12 @@ impl RendezvousServer {
             &addr
         );
         let mut msg_out = RendezvousMessage::new();
+        let grant = self.reply_grant(addr_a, &la.id, addr, ws);
         let mut p = PunchHoleResponse {
             socket_addr: la.local_addr.clone(),
+            socket_addr_v6: self.reply_v6(&la.socket_addr_v6, &grant),
             pk: self.get_pk(&la.version, la.id).await,
             relay_server: la.relay_server,
-            socket_addr_v6: forward_v6(&la.socket_addr_v6),
             ..Default::default()
         };
         p.set_is_local(true);
@@ -980,12 +985,18 @@ impl RendezvousServer {
                 && UDP_PUNCH.load(Ordering::SeqCst)
                 && (1..=u16::MAX as i32).contains(&ph.udp_port)
                 && (!same_intranet || session_key.is_some());
-            let grant = if udp || session_key.is_some() {
-                self.routes
-                    .open(addr, &id, try_into_v4(peer_addr).ip(), udp, session_key)
+            // the route also lets the peer's IPv6 address back to this controller
+            let v6 = !socket_addr_v6.is_empty();
+            let grant = if udp || v6 || session_key.is_some() {
+                let peer_ip = try_into_v4(peer_addr).ip();
+                let want = punch::Want { udp, v6 };
+                self.routes.open(addr, &id, peer_ip, want, session_key)
             } else {
                 Default::default()
             };
+            if !grant.v6 {
+                socket_addr_v6 = Bytes::new();
+            }
             // FetchLocalAddr cannot carry an offer; WebRTC works in a LAN anyway
             if same_intranet && !grant.webrtc {
                 log::debug!(
@@ -1167,12 +1178,42 @@ impl RendezvousServer {
         }
     }
 
+    // What a reply to controller connection `ctl` may carry back besides the
+    // original fields (see PunchRoutes::reply_grant). Nothing over WebSocket,
+    // whose address can come from a header.
+    fn reply_grant(
+        &self,
+        ctl: SocketAddr,
+        peer_id: &str,
+        sender: SocketAddr,
+        ws: bool,
+    ) -> punch::Grant {
+        if ws {
+            return Default::default();
+        }
+        self.routes.reply_grant(ctl, peer_id, sender.ip())
+    }
+
     // A WebRTC answer is passed on only for the controller's own route.
-    fn answer_allowed(&self, answer: &str, ctl: SocketAddr, peer_id: &str) -> bool {
+    fn answer_allowed(&self, answer: &str, grant: &punch::Grant) -> bool {
         !answer.is_empty()
             && answer.len() <= punch::MAX_SDP_LEN
             && WEBRTC.load(Ordering::SeqCst)
-            && self.routes.webrtc_answer(ctl, peer_id)
+            && grant.webrtc
+    }
+
+    // The peer's IPv6 address goes back only where the controller's went to the
+    // peer, so not past a forced relay or to a 1.4.x controller, and it counts
+    // against the per-target limit: the controller punches it.
+    fn reply_v6(&self, addr: &Bytes, grant: &punch::Grant) -> Bytes {
+        if !grant.v6 {
+            return Bytes::new();
+        }
+        let v6 = forward_v6(addr);
+        match punch::decode_addr(&v6) {
+            Some(target) if self.ipv6_target.allow(target.ip(), false) => v6,
+            _ => Bytes::new(),
+        }
     }
 
     // Trickle ICE. The controller sends its candidates on its punch connection, with

@@ -95,16 +95,32 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   (the client falls back to the other transports). Conservative choice
   against ICE injection; a future client with a different envelope format
   would lose WebRTC rather than get an unprotected route.
-- **UDP `PunchHoleSent` source check.** Besides the route, the datagram's
-  source IP must match the controlled peer's registered IP (IPv6: same /64,
-  because of privacy addresses) for `is_udp`. This stops a third party that
-  knows a route from steering the controller's UDP probes to another host.
-  A mismatch (NAT pools without paired addresses, multi-WAN) still gets a
-  response without `is_udp` (review finding UDP-3), so the WebRTC answer
-  arrives and the controller can relay instead of waiting for retries.
+- **Reply sender check.** Besides the route, the datagram's source IP must
+  match the controlled peer's registered IP (IPv6: same /64, because of
+  privacy addresses). This stops a third party that knows a route from
+  steering the controller's UDP probes to another host. A UDP `PunchHoleSent`
+  from another host is ignored and leaves the route open (extra review
+  GPT-1). Until then it was answered without `is_udp` (review finding UDP-3),
+  which let anyone who knew the controller's address use up the route before
+  the peer. The cost: a peer behind a NAT pool without paired addresses or a
+  multi-WAN router loses the UDP attempt; the controller's parallel TCP round
+  (on by default) carries the connection, and without it the controller's
+  retries end on the relay. The same check now applies to the WebRTC answer
+  and the IPv6 address in TCP replies: they only come back from the peer's
+  registered host. The TCP reply itself still reaches the controller from
+  anywhere, as with the original server; refusing it would cost such peers
+  their relay fallback.
+- **IPv6 back only where IPv6 went out** (extra review GPT-2). The peer's
+  `socket_addr_v6` goes back only to a controller whose own address went to
+  the peer. A 1.4.9 or 1.5.0 peer only reports one in that case anyway, so
+  genuine clients lose nothing; a modified peer can no longer hand an IPv6
+  target to a 1.4.x controller or past a forced relay. The address also
+  counts against the per-target limit, like the controller's on the way
+  out. The route table records this, so an IPv6 forward now needs a route
+  like UDP and WebRTC do; a full table means no IPv6 for that request.
 - **Route capacity exhausted → degrade.** If no route can be opened, the
   request is forwarded like the original server would (no `udp_port`, no
-  offer).
+  IPv6 address, no offer).
 - **TCP frame limit 64 KiB on 21116.** The legacy codec accepted frames up to
   1 GiB. The largest legitimate rendezvous message is a `PunchHoleRequest`
   with an offer and a token (a few KiB).

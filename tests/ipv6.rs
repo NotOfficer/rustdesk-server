@@ -153,6 +153,117 @@ async fn forced_relay_drops_v6() {
     let _reply = relay_response(&hbbs, ph.socket_addr, v6(B_V6)).await;
     let rr = ctl.expect(3000, pick_relay_response).await.unwrap();
     assert!(rr.socket_addr_v6.is_empty());
+    // nor in a PunchHoleSent the relayed peer should not have sent
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    request(&hbbs, &mut ctl, "peer01", v6(A_V6)).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    let _reply = punch_hole_sent(&hbbs, ph.socket_addr, "peer01", v6(B_V6)).await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.socket_addr_v6.is_empty());
+}
+
+// The peer's IPv6 address goes back only where the controller's went to the
+// peer: a 1.5.0 peer only sends one then, and the controller punches it.
+#[tokio::test]
+async fn v6_reply_needs_the_controllers_v6_forwarded() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    for (version, ctl_v6) in [("1.4.9", v6(A_V6)), ("1.5.0", Bytes::new())] {
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        let mut req = punch_hole_request("peer01", &hbbs.key);
+        req.socket_addr_v6 = ctl_v6.clone();
+        req.version = version.to_owned();
+        ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert!(ph.socket_addr_v6.is_empty());
+        let _reply = punch_hole_sent(&hbbs, ph.socket_addr.clone(), "peer01", v6(B_V6)).await;
+        let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+        assert!(res.socket_addr_v6.is_empty(), "version {}", version);
+
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        let mut req = punch_hole_request("peer01", &hbbs.key);
+        req.socket_addr_v6 = ctl_v6;
+        req.version = version.to_owned();
+        ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        let _reply = relay_response(&hbbs, ph.socket_addr, v6(B_V6)).await;
+        let rr = ctl.expect(3000, pick_relay_response).await.unwrap();
+        assert!(rr.socket_addr_v6.is_empty(), "version {}", version);
+    }
+    // the same intranet: FetchLocalAddr and LocalAddr
+    let mut ctl = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    let mut req = punch_hole_request("peer01", &hbbs.key);
+    req.socket_addr_v6 = v6(A_V6);
+    req.version = "1.4.9".to_owned();
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    let fla = peer.expect(3000, pick_fetch_local_addr).await.unwrap();
+    assert!(fla.socket_addr_v6.is_empty());
+    let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    let local = reply.local_addr();
+    reply
+        .send(&msg(|m| {
+            m.set_local_addr(LocalAddr {
+                id: "peer01".to_owned(),
+                socket_addr: fla.socket_addr.clone(),
+                local_addr: mangle(local),
+                version: "1.5.0".to_owned(),
+                socket_addr_v6: v6(B_V6),
+                ..Default::default()
+            })
+        }))
+        .await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.is_local());
+    assert!(res.socket_addr_v6.is_empty());
+}
+
+// Anybody who knows the controller's address can send a reply; the IPv6
+// address in it only counts from the host the peer registered from.
+#[tokio::test]
+async fn v6_reply_only_from_the_peer_host() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    request(&hbbs, &mut ctl, "peer01", v6(A_V6)).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert!(!ph.socket_addr_v6.is_empty());
+    let mut stranger = Tcp::connect(&hbbs, "127.0.0.3".parse().unwrap(), Kx::None).await;
+    stranger
+        .send(&msg(|m| {
+            m.set_punch_hole_sent(PunchHoleSent {
+                socket_addr: ph.socket_addr,
+                id: "peer01".to_owned(),
+                version: "1.5.0".to_owned(),
+                socket_addr_v6: v6(B_V6),
+                ..Default::default()
+            })
+        }))
+        .await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.socket_addr_v6.is_empty());
+}
+
+// One peer naming the same IPv6 target to many controllers: they would all
+// probe it.
+#[tokio::test]
+async fn v6_replies_are_limited_per_target() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut forwarded = 0;
+    for i in 0..70u8 {
+        // a different controller, each with its own IPv6 /64
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 20, 0, i + 1));
+        let mut ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
+        request(&hbbs, &mut ctl, "peer01", v6(&format!("[2001:db8:{}::a]:40001", i + 1))).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert!(!ph.socket_addr_v6.is_empty());
+        let _reply = punch_hole_sent(&hbbs, ph.socket_addr, "peer01", v6("[2001:db8:ffff::b]:40002")).await;
+        let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+        if !res.socket_addr_v6.is_empty() {
+            forwarded += 1;
+        }
+    }
+    assert!((60..=62).contains(&forwarded), "{} forwarded", forwarded);
 }
 
 #[tokio::test]
