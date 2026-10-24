@@ -102,6 +102,7 @@ Who uses it (1.5.0):
 | A signed in (`access_token`) or switching sides | `secure_tcp`; failure is fatal (client.rs:878) |
 | A's other rounds, NAT type test, B's TCP punch / LocalAddr replies | none, plaintext |
 | B's `PunchHoleSent` with a WebRTC answer (TCP path), B's `RelayResponse` with an answer, B's ICE connection | `secure_tcp_required` |
+| B's UDP `PunchHoleSent` with a WebRTC answer (when A sent `udp_port`) | none: the answer travels in plaintext UDP to hbbs (client design) |
 
 The client verifies `keys[0]` with its configured `key`, falling back to
 RustDesk's public key if that is empty (common.rs:2025). A client without the
@@ -204,13 +205,20 @@ hbbs -tcp-> A      IceCandidate { session_key, candidate }                (on A'
   and never reconnects it (client.rs:671).
 * A round carrying an offer never does a TCP punch (client.rs:340); TCP is
   the fallback round's job.
-* Both sides need the server's key in their `key` option: the controlled
-  side sends its answer over TCP only after the key exchange
-  (rendezvous_mediator.rs:1172) and silently gives up if it fails. hbbs
-  therefore forwards the offer only twice per controller connection while
-  nothing comes back; a third (re-sent) request goes without it, the peer
-  answers with a plain punch and the controller can still relay, as with the
-  original server.
+* The controlled side sends its answer over TCP only after the key exchange
+  (rendezvous_mediator.rs:1172) and silently gives up if it fails, so without
+  the server's key in its `key` option it answers only on the UDP path. When
+  A sent a `udp_port`, B puts the answer into its UDP `PunchHoleSent`
+  instead (rendezvous_mediator.rs:1146, `punch_udp_hole`), without any key
+  exchange; hbbs forwards it from B's registered host. So WebRTC together
+  with UDP punching can work without the key on B, and that answer (ICE
+  credentials, DTLS fingerprint) crosses the network to hbbs unencrypted.
+  That is the client's design; the DTLS handshake and RustDesk's own check of
+  the peer's signed key still protect the session. B's ICE connection always
+  needs the key. hbbs forwards the offer only twice per controller
+  connection while nothing comes back; a third (re-sent) request goes without
+  it, the peer answers with a plain punch and the controller can still
+  relay, as with the original server.
 * Same intranet: `FetchLocalAddr` has no offer field. A request carrying an
   offer therefore gets a `PunchHole` (WebRTC uses LAN host candidates). The
   offer-less fallback round still gets `FetchLocalAddr` for the direct LAN
@@ -432,7 +440,7 @@ be abused to make a peer send packets to a third host:
 | Client | Effect |
 |---|---|
 | 1.5.0 | all four features work when the controller enables them |
-| 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: once it has replied with its version (a `PunchHoleSent`, `LocalAddr` or `RelayResponse` to a waiting controller, sent from its registered host over plain TCP or a claimed UDP route; never over WebSocket, whose address can come from a header), hbbs remembers it in memory and sends it no `udp_port` and no IPv6 address, so it does its TCP punch as with the original server. Only before its first reply after a server start can it get them; it then punches UDP with probes 1.5.0 does not answer (`RDP?`/`RDP!` came with 1.5.0), that round ends on the relay after ~3 s, and the controller's parallel TCP round usually wins first. WebRTC offers are ignored by it; the controller falls back. |
+| 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: once it has replied with its version (a `PunchHoleSent`, `LocalAddr` or `RelayResponse` to a waiting controller, sent from its registered host over plain TCP or a claimed UDP route; never over WebSocket, whose address can come from a header), hbbs remembers it in memory and sends it no `udp_port` and no IPv6 address, so it does its TCP punch as with the original server. Only before its first reply after a server start can it get them, or always if its replies leave from another IP than its registration (multi-WAN, NAT pool without paired addresses); it then punches UDP with probes 1.5.0 does not answer (`RDP?`/`RDP!` came with 1.5.0), that round ends on the relay after ~3 s, and the controller's parallel TCP round usually wins first. WebRTC offers are ignored by it; the controller falls back. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
 | all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |

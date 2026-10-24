@@ -238,6 +238,11 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   memory only, the database is unchanged) and then withholds `udp_port` and
   IPv6 from it. The first connection to such a peer after a server start
   can still take the UDP detour (the controller's TCP round usually wins).
+  A peer whose replies leave from another IP than its registration (multi-WAN,
+  NAT pool without paired addresses) is never recognized (extra review
+  OPUS-1). Learning the mark from any host was not adopted: any licensed
+  client could then keep a 1.5.0 peer downgraded by forging replies to its
+  own route, which FINAL-8-1 closed.
 - **Round 8 fixes are not independently reviewed** (FINAL-8-1, FINAL-8-2):
   the review loop stops after 8 rounds. The legacy mark is now learned only
   from replies to a waiting controller over plain TCP or a claimed UDP route
