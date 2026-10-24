@@ -77,6 +77,11 @@ CASES=(
   "mixed-old-controller;flat;modern;old/latest;;${ALL_Y};${DIRECT};-;-"
   "webrtc-old-controlled;flat;modern;latest/old;;${WEBRTC_ONLY};${ANY};-;-"
   "baseline-webrtc-old-controlled;flat;baseline;latest/old;;${WEBRTC_ONLY};${ANY};-;-"
+  # client 1.4.0 (no UDP/IPv6/WebRTC fields, logs no connection type)
+  "client-1.4.0;flat;modern;1.4.0;;-;TCP;-;-"
+  "baseline-client-1.4.0;flat;baseline;1.4.0;;-;TCP;-;-"
+  "mixed-1.4.0-controller;flat;modern;1.4.0/latest;;-;TCP;-;-"
+  "mixed-1.4.0-controlled;flat;modern;latest/1.4.0;;${ALL_Y};${DIRECT};-;-"
   # --- lan: both clients behind ONE router (same public IP -> same-intranet path)
   "lan-baseline;lan;baseline;latest;;-;TCP;TCP;Fetch local addr"
   "lan-default;lan;modern;latest;;-;TCP;TCP;Fetch local addr"
@@ -451,6 +456,8 @@ EOF
     while [ $SECONDS -lt $end ]; do
       logs="$(controller_logs)"
       got="$(grep -o 'used to establish [^ ]* connection' <<<"$logs" | head -1 | awk '{print $4}')"
+      # 1.4.0 logs no type ("used to establish connection"); resolved from hbbr below
+      [ -z "$got" ] && grep -q 'used to establish connection' <<<"$logs" && got=untyped
       [ -n "$got" ] && break
       sleep 1
     done
@@ -470,11 +477,16 @@ EOF
     # A 1.5.0 controller with a WebRTC offer sends two requests in parallel (the offer
     # round and a pure TCP fallback round), so there can be several "#1" lines.
     offer="$(grep -o '#1 [^ ]* punch attempt' <<<"$logs" | awk '{print $2}' | awk '!seen[$0]++' | paste -sd, -)"
-    grep -o 'used to establish [^ ]* connection.*' <<<"$logs" >"$dir/established.txt" || true
+    grep -oE 'used to establish ([^ ]+ )?connection.*' <<<"$logs" >"$dir/established.txt" || true
     grep -o '#[0-9] [^ ]* punch attempt.*' <<<"$logs" >"$dir/punch-attempts.txt" || true
   fi
 
   collect "$dir"
+  if [ "$got" = untyped ]; then
+    # 1.4.0 knows only TCP as direct type; a relayed session shows up in hbbr
+    if grep -q 'got paired' "$dir/hbbr.stdout.log" 2>/dev/null; then got=Relay; else got=TCP; fi
+    note="${note:+$note; }type from hbbr log (1.4.0 logs none)"
+  fi
   # key exchange versions hbbs completed ("Tcp connection from .. secured, version N")
   kx="$(grep -o 'secured, version [0-9]*' "$dir/hbbs.stdout.log" 2>/dev/null | awk '{print "v"$3}' | sort -u | paste -sd, -)"
   kx="${kx:--}"

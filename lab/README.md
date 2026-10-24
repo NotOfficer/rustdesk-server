@@ -100,6 +100,8 @@ TCP|UDP|IPv6|WebRTC.
 | `old-client` | flat | modern | old | defaults | TCP |
 | `baseline-old-allopts` / `old-client-allopts` | flat | baseline / modern | old | all Y | direct |
 | `mixed-old-controlled` / `mixed-old-controller` | flat | modern | latest/old, old/latest | all Y | direct |
+| `client-1.4.0` / `baseline-client-1.4.0` | flat | modern / baseline | 1.4.0 | defaults | TCP (1.4.0 logs no type: Relay if hbbr paired the session, else TCP) |
+| `mixed-1.4.0-controller` / `mixed-1.4.0-controlled` | flat | modern | 1.4.0/latest, latest/1.4.0 | defaults / all Y | TCP / direct |
 | `webrtc-old-controlled` / `baseline-webrtc-old-controlled` | flat | modern / baseline | latest/old | tcp-punch N, webrtc Y | connects; Relay allowed |
 | `lan-baseline` / `lan-default` | lan | baseline / modern | latest | defaults | TCP, hbbs log `Fetch local addr` |
 | `lan-webrtc` | lan | modern | latest | tcp-punch N, webrtc Y | WebRTC, hbbs log `WebRTC offer` |
