@@ -312,6 +312,26 @@ services:
 Zurück zum offiziellen Image kommst du, indem du `image:` wieder
 zurückstellst. Datenbank und Schlüssel passen weiter.
 
+### Fertiges Image von GitHub
+
+Selbst bauen musst du nicht. Der Workflow "publish image" baut das Image auf
+GitHub und legt es in der GitHub Container Registry ab. Im Fork klickst du
+auf Actions, links auf "publish image" und rechts auf "Run workflow". Unter
+"Use workflow from" wählst du den Branch, ein zusätzlicher Tag wie `latest`
+ist optional. Nach einigen Minuten liegt das Image unter
+`ghcr.io/notofficer/rustdesk-server:<branch>`, Schrägstriche im Branch-Namen
+werden zu Bindestrichen. Für unseren Branch heißt das:
+
+```yaml
+    image: ghcr.io/notofficer/rustdesk-server:feature-modern-transports
+```
+
+Meldet `docker pull` auf deinem Server "denied", ist das Paket noch privat.
+Dann stellst du es auf GitHub unter deinem Profil, Packages,
+rustdesk-server, Package settings auf Public. Alternativ meldest du den
+Server mit `docker login ghcr.io` und einem Token mit dem Recht
+`read:packages` an.
+
 ### Schalter
 
 Alle neuen Funktionen sind standardmäßig an. Abschalten kannst du sie mit
