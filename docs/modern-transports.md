@@ -392,6 +392,11 @@ Behavior changes that are improvements, not regressions:
   `SECURE_TCP` they work if their `key` matches the server key. With a wrong
   key they still fail, now immediately ("Signature mismatch").
 * Signed-in 1.4.0 clients lost 18 s; now they get an encrypted connection.
+* Clients call the API of RustDesk Server Pro in the background and, when
+  plain HTTP fails, retry through hbbs (`HttpProxyRequest` after the key
+  exchange, common.rs:1528). The open-source hbbs has no API either way;
+  such a retry used to wait 18 s for the key exchange and now fails at once,
+  because the message is unknown and the connection is closed as before.
 * Clients that register over TCP (proxy, WebSocket, `disable-udp`) could not
   register before and still cannot: `RegisterPk` over TCP is answered with
   `NOT_SUPPORT` as before. With `SECURE_TCP` they now get that answer after a
