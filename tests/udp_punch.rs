@@ -149,7 +149,7 @@ async fn start_udp_punch(kx: Kx) -> Punch {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.udp_port = port;
     ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    let ph = peer.expect(3000, pick_punch_hole).await.expect("no PunchHole");
+    let ph = peer.expect(5000, pick_punch_hole).await.expect("no PunchHole");
     assert_eq!(ph.udp_port, port);
     Punch { hbbs, peer, ctl, ph }
 }

@@ -175,6 +175,17 @@ impl Hbbs {
         std::fs::read_to_string(self.dir.path().join("hbbs.log")).unwrap_or_default()
     }
 
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Open file descriptors of the hbbs process (Linux).
+    pub fn open_fds(&self) -> usize {
+        std::fs::read_dir(format!("/proc/{}/fd", self.pid()))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }

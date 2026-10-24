@@ -492,3 +492,44 @@ async fn switch_values_false_and_off_turn_features_off() {
         assert!(hbbs.log().contains(line), "{}", line);
     }
 }
+
+// A WebRTC route keeps the controller's connection for ICE. Replies for its
+// address can be forged by anyone; they must not queue up behind a controller
+// that stopped reading. So the kept connection serves one response; after it
+// only the ICE candidates of the route.
+#[tokio::test]
+async fn a_kept_connection_serves_one_response() {
+    let Session { hbbs, mut ctl, ph, .. } = start_session(&[]).await;
+    let relay_response = || {
+        let mut rr = RelayResponse {
+            socket_addr: ph.socket_addr.clone(),
+            uuid: "u".to_owned(),
+            relay_server: "relay.example:21117".to_owned(),
+            version: "1.5.0".to_owned(),
+            webrtc_sdp_answer: answer(),
+            ..Default::default()
+        };
+        rr.set_id("peer01".to_owned());
+        msg(|m| m.set_relay_response(rr))
+    };
+    for _ in 0..5 {
+        let mut forged = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+        forged.send(&relay_response()).await;
+    }
+    let _reply = answer_over_tcp(&hbbs, &ph, answer()).await;
+    let mut responses = 0;
+    while let Some(m) = ctl.recv(700).await {
+        if matches!(
+            m.union,
+            Some(rendezvous_message::Union::RelayResponse(_))
+                | Some(rendezvous_message::Union::PunchHoleResponse(_))
+        ) {
+            responses += 1;
+        }
+    }
+    assert_eq!(responses, 1);
+    // the candidates still get through
+    let mut ice_conn = ice_connection(&hbbs).await;
+    send_ice_from_peer(&mut ice_conn, &ph.socket_addr, FP, CANDIDATE).await;
+    assert!(ctl.expect(3000, pick_ice).await.is_some());
+}

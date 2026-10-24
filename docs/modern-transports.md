@@ -254,8 +254,11 @@ check: licence key, peer exists, peer online. It is removed when A's
 connection closes or when it expires.
 
 While a WebRTC route is alive, A's TCP sink stays in `tcp_punch` after the
-first response, so that later answers and candidates can reach A. Without a
-WebRTC route, the sink is still consumed by the first response, as before.
+first response, so that the ICE candidates can reach A. It still serves only
+one response: further replies for A's address (which anyone can forge) are
+dropped, so they cannot queue up behind a controller that stopped reading.
+Without a WebRTC route, the sink is consumed by the first response, as
+before.
 
 ### Handlers
 
@@ -396,7 +399,8 @@ be abused to make a peer send packets to a third host:
   binding in the clients (`dtls_fingerprint_bound`, common.rs:2296) still protects against a
   man-in-the-middle.
 * **Sink lifetime**: a WebRTC route keeps A's sink at most until the route
-  expires or A disconnects. Writes to a kept sink time out after 3 s.
+  expires or A disconnects, for one response and the route's candidates.
+  Every write to a kept sink gives up after 3 s, waiting for it included.
 
 ---
 

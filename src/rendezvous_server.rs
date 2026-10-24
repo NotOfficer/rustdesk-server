@@ -1071,13 +1071,17 @@ impl RendezvousServer {
         });
     }
 
-    // A stashed sink serves one response, unless a WebRTC route still needs it for
-    // the answer and the ICE candidates.
+    // A stashed sink serves one response. A WebRTC route keeps it for the ICE
+    // candidates afterwards, but no further response: replies can be forged by
+    // anyone and must not queue up behind a controller that stopped reading.
     async fn take_tcp_sink(&self, addr: SocketAddr) -> Option<SharedSink> {
         let addr = try_into_v4(addr);
-        self.routes.replied(addr);
+        let already_replied = self.routes.replied(addr);
         let mut tcp_punch = self.tcp_punch.lock().await;
         if self.routes.keeps_sink(addr) {
+            if already_replied {
+                return None;
+            }
             tcp_punch.get(&addr).cloned()
         } else {
             tcp_punch.remove(&addr)
@@ -1086,11 +1090,12 @@ impl RendezvousServer {
 
     async fn send_to_shared_sink(sink: Option<SharedSink>, msg: RendezvousMessage) {
         if let Some(sink) = sink {
-            let mut sink = sink.lock().await;
-            if timeout(SINK_SEND_TIMEOUT, Self::write_sink(&mut sink, msg))
-                .await
-                .is_err()
-            {
+            // the timeout covers waiting for the sink as well
+            let send = async {
+                let mut sink = sink.lock().await;
+                Self::write_sink(&mut sink, msg).await;
+            };
+            if timeout(SINK_SEND_TIMEOUT, send).await.is_err() {
                 log::debug!("Timeout writing to a tcp connection");
             }
         }

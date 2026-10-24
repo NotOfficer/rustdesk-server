@@ -359,10 +359,12 @@ impl PunchRoutes {
         Some(same_host(r.peer_ip, src.ip()))
     }
 
-    /// Notes that a response from the peer reached controller connection `ctl`.
-    pub(crate) fn replied(&self, ctl: SocketAddr) {
-        if let Some(r) = self.lock().get_mut(&try_into_v4(ctl)) {
-            r.replied = true;
+    /// Notes that a response from the peer is going to controller connection
+    /// `ctl`; returns whether one had already gone there.
+    pub(crate) fn replied(&self, ctl: SocketAddr) -> bool {
+        match self.lock().get_mut(&try_into_v4(ctl)) {
+            Some(r) => std::mem::replace(&mut r.replied, true),
+            None => false,
         }
     }
 
