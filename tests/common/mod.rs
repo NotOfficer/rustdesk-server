@@ -84,9 +84,9 @@ impl Hbbs {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
                 }
-                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-                    && dir.path().join("id_ed25519.pub").exists()
-                {
+                // with -k <public key> hbbs has no key pair
+                let keyed = args.contains(&"-k") || dir.path().join("id_ed25519.pub").exists();
+                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() && keyed {
                     up = true;
                     break;
                 }
@@ -97,12 +97,17 @@ impl Hbbs {
                 child.wait().ok();
                 continue;
             }
-            let key = std::fs::read_to_string(dir.path().join("id_ed25519.pub"))
-                .unwrap()
-                .trim()
-                .to_owned();
-            let raw = base64::decode(&key).unwrap();
-            let pk = sign::PublicKey::from_slice(&raw).unwrap();
+            let key = match args.iter().position(|a| *a == "-k") {
+                Some(i) => args[i + 1].to_owned(),
+                None => std::fs::read_to_string(dir.path().join("id_ed25519.pub"))
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+            };
+            let pk = base64::decode(&key)
+                .ok()
+                .and_then(|raw| sign::PublicKey::from_slice(&raw))
+                .unwrap_or(sign::PublicKey([0u8; 32]));
             return Hbbs {
                 child,
                 dir,

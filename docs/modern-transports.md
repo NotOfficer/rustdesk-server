@@ -14,7 +14,8 @@ derived from the client source at release tag **1.5.0** (hbb_common
 `client.rs:863` point into the client repository at 1.5.0.
 
 Every feature can be switched off; see [Switches](#switches). With all four
-switches off, `hbbs` behaves like the original open-source server.
+switches off, `hbbs` behaves like the original open-source server, except
+that TCP frames on the main port are limited to 64 KiB.
 
 ---
 
@@ -55,10 +56,14 @@ client -> hbbs  KeyExchange { keys: [client_eph_pk, sealed_key], version: picked
                 then every frame in both directions is encrypted
 ```
 
-* `hbbs` sends its `KeyExchange` immediately after accepting a TCP connection
-  on 21116, before reading anything. The client reads first, with an 18 s
-  timeout (common.rs:2162), so a server that stays silent costs every
-  key-exchanging client 18 s.
+* `hbbs` sends its `KeyExchange` when a new TCP connection on 21116 has
+  stayed silent for 100 ms. A client that wants the exchange reads first,
+  with an 18 s timeout (common.rs:2162), so a server that stays silent costs
+  it 18 s. Clients that skip the exchange send their request at once, and
+  the controlled side often closes right after without reading. An unread
+  offer would turn that close into a TCP reset, which can lose the request
+  (on packet loss, or on servers that drop unread data on a reset), so they
+  get no offer.
 * `eph_pk` is a fresh X25519 key per connection. `keys[0]` is
   `sign(eph_pk)` with the server's Ed25519 key, the one in `id_ed25519`.
 * **Version 1** (what 1.5.0 negotiates, `KX_VERSION_LATEST = 1`):
@@ -74,8 +79,11 @@ client -> hbbs  KeyExchange { keys: [client_eph_pk, sealed_key], version: picked
 * **Version 0**: older clients (1.4.x) ignore `version`/`signed_params` and
   reply without `version`. hbbs then uses the single shared key.
 * A client that does not want the exchange simply sends its request in
-  plaintext. hbbs accepts a plaintext **first** frame and then stays in
-  plaintext on that connection. Only the first frame may be a `KeyExchange`.
+  plaintext, before or after the offer. hbbs accepts a plaintext **first**
+  frame and then stays in plaintext on that connection. Only the first frame
+  after the offer may be a `KeyExchange`.
+* The offer needs the server's private key. If `-k` is a public key, nothing
+  is offered and a warning is logged.
 * Not on 21115 (NAT test port) and not on the WebSocket port 21118: WebSocket
   clients skip the exchange (common.rs:2147) and get exactly the old
   behavior.
@@ -185,7 +193,7 @@ hbbr is not affected; hbbr is not changed.
 
 | Env var | CLI flag | Default | Off means |
 |---|---|---|---|
-| `SECURE_TCP` | `--secure-tcp` | `Y` | no `KeyExchange` is sent (original behavior). WebRTC then cannot work, because the clients require the exchange for it. |
+| `SECURE_TCP` | `--secure-tcp` | `Y` | no `KeyExchange` is offered (original behavior). WebRTC then cannot work, because the clients require the exchange for it. |
 | `IPV6_PUNCH` | `--ipv6-punch` | `Y` | `socket_addr_v6` is dropped from every forwarded message |
 | `WEBRTC` | `--webrtc` | `Y` | offers and answers are dropped; `IceCandidate` closes the connection as before |
 | `UDP_PUNCH` | `--udp-punch` | `Y` | UDP `TestNatRequest` is not answered, `udp_port` is dropped, UDP `PunchHoleSent` is ignored |
@@ -217,7 +225,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 
 | Message | Arrives | New behavior |
 |---|---|---|
-| (accept) | TCP 21116 | send `KeyExchange` v1 (`SECURE_TCP`) |
+| (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 100 ms (`SECURE_TCP`) |
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
 | `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route |

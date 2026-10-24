@@ -141,6 +141,12 @@ async fn websocket_has_no_key_exchange() {
 async fn broken_reply_closes_the_connection() {
     let hbbs = Hbbs::start(&[], &[]).await;
     let mut tcp = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    // wait for the offer like a key-exchanging client, then answer it badly
+    let offer = tcp.conn.next_timeout(3000).await.unwrap().unwrap();
+    assert!(matches!(
+        parse(&offer).unwrap().union,
+        Some(rendezvous_message::Union::KeyExchange(_))
+    ));
     tcp.send(&msg(|m| {
         m.set_key_exchange(KeyExchange {
             keys: vec![vec![1u8; 32].into(), vec![2u8; 48].into()],
@@ -202,6 +208,7 @@ async fn tcp_punch_with_an_encrypted_controller() {
         assert_eq!(demangle(&ph.socket_addr), ctl.local_addr());
         // like handle_punch_hole: new connection, send_raw without reading
         let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+        let reply_addr = reply.local_addr();
         reply
             .send(&msg(|m| {
                 m.set_punch_hole_sent(PunchHoleSent {
@@ -213,14 +220,97 @@ async fn tcp_punch_with_an_encrypted_controller() {
                 })
             }))
             .await;
+        // and drops the socket right away
+        drop(reply);
         let res = ctl
             .expect(3000, pick_punch_hole_response)
             .await
             .expect("no PunchHoleResponse");
-        assert_eq!(demangle(&res.socket_addr), reply.local_addr());
+        assert_eq!(demangle(&res.socket_addr), reply_addr);
         let id_pk = IdPk::parse_from_bytes(&sign::verify(&res.pk, &hbbs.pk).unwrap()).unwrap();
         assert_eq!(id_pk.id, "peer01");
         assert_eq!(&id_pk.pk[..], &peer.pk.0[..]);
         assert!(!res.is_udp);
     }
+}
+
+// A client that speaks first gets no offer, so a connection it drops without
+// reading still closes normally.
+#[tokio::test]
+async fn speaking_first_gets_no_offer() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let mut conn = FramedStream::new(hbbs.tcp_addr(), None, 3000).await.unwrap();
+    conn.send(&msg(|m| {
+        m.set_punch_hole_request(punch_hole_request("nobody1", &hbbs.key))
+    }))
+    .await
+    .unwrap();
+    let first = conn.next_timeout(3000).await.unwrap().unwrap();
+    assert!(matches!(
+        parse(&first).unwrap().union,
+        Some(rendezvous_message::Union::PunchHoleResponse(_))
+    ));
+    assert!(conn.next_timeout(500).await.is_none());
+}
+
+#[tokio::test]
+async fn without_a_private_key_nothing_is_offered() {
+    let (pk, _) = sign::gen_keypair();
+    let key = base64::encode(pk);
+    let hbbs = Hbbs::start(&[], &["-k", &key]).await;
+    let mut conn = FramedStream::new(hbbs.tcp_addr(), None, 3000).await.unwrap();
+    assert!(conn.next_timeout(700).await.is_none());
+    assert!(hbbs.log().contains("SECURE_TCP has no effect"));
+}
+
+// LocalAddr (same intranet) and RelayResponse reach an encrypted controller,
+// although the controlled side drops its plaintext connection right away.
+#[tokio::test]
+async fn local_addr_and_relay_response_reach_an_encrypted_controller() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut ctl = Tcp::connect(&hbbs, PEER_IP, Kx::V1).await;
+    ctl.send(&msg(|m| {
+        m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))
+    }))
+    .await;
+    let fla = peer.expect(3000, pick_fetch_local_addr).await.unwrap();
+    let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    let local = reply.local_addr();
+    reply
+        .send(&msg(|m| {
+            m.set_local_addr(LocalAddr {
+                id: "peer01".to_owned(),
+                socket_addr: mangle(demangle(&fla.socket_addr)),
+                local_addr: mangle(local),
+                version: "1.5.0".to_owned(),
+                ..Default::default()
+            })
+        }))
+        .await;
+    drop(reply);
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.is_local());
+    assert_eq!(demangle(&res.socket_addr), local);
+
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
+    ctl.send(&msg(|m| {
+        m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))
+    }))
+    .await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    let mut rr = RelayResponse {
+        socket_addr: ph.socket_addr,
+        uuid: "uuid-1".to_owned(),
+        relay_server: "relay.example:21117".to_owned(),
+        version: "1.5.0".to_owned(),
+        ..Default::default()
+    };
+    rr.set_id("peer01".to_owned());
+    reply.send(&msg(|m| m.set_relay_response(rr))).await;
+    drop(reply);
+    let rr = ctl.expect(3000, pick_relay_response).await.unwrap();
+    assert_eq!(rr.uuid, "uuid-1");
+    assert!(!rr.pk().is_empty());
 }

@@ -52,6 +52,8 @@ enum Data {
 const REG_TIMEOUT: i64 = 30_000;
 // largest rendezvous frame accepted on TCP; a PunchHoleRequest with an offer is a few KiB
 const MAX_TCP_FRAME: usize = 64 * 1024;
+// how long a new TCP connection may speak first before the key exchange is offered
+const KX_OFFER_DELAY: u64 = 100;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
@@ -222,6 +224,9 @@ impl RendezvousServer {
             }
         );
         load_switch("SECURE_TCP", &SECURE_TCP);
+        if SECURE_TCP.load(Ordering::SeqCst) && rs.inner.sk.is_none() {
+            log::warn!("SECURE_TCP has no effect: the key is not a private key, nothing to sign with");
+        }
         load_switch("IPV6_PUNCH", &IPV6_PUNCH);
         load_switch("WEBRTC", &WEBRTC);
         load_switch("UDP_PUNCH", &UDP_PUNCH);
@@ -1481,23 +1486,38 @@ impl RendezvousServer {
             codec.set_max_packet_length(MAX_TCP_FRAME);
             let (a, mut b) = Framed::new(stream, codec).split();
             sink = Some(Sink::TcpStream(a, None));
+            let mut first = None;
             let mut offer = None;
             if SECURE_TCP.load(Ordering::SeqCst) {
                 if let Some(sk) = self.inner.sk.as_ref() {
-                    match key_exchange::offer(sk) {
-                        Ok((ex, o)) => {
-                            let mut msg_out = RendezvousMessage::new();
-                            msg_out.set_key_exchange(ex);
-                            Self::send_to_sink(&mut sink, msg_out).await;
-                            offer = Some(o);
-                        }
-                        Err(err) => log::error!("Failed to offer key exchange: {}", err),
+                    // Clients that want the exchange wait for our offer. The others speak
+                    // first and often close right after; an unread offer would turn that
+                    // close into a reset, which can lose their message.
+                    match timeout(KX_OFFER_DELAY, b.next()).await {
+                        Ok(Some(Ok(bytes))) => first = Some(bytes),
+                        Ok(_) => return Ok(()),
+                        Err(_) => match key_exchange::offer(sk) {
+                            Ok((ex, o)) => {
+                                let mut msg_out = RendezvousMessage::new();
+                                msg_out.set_key_exchange(ex);
+                                Self::send_to_sink(&mut sink, msg_out).await;
+                                offer = Some(o);
+                            }
+                            Err(err) => log::error!("Failed to offer key exchange: {}", err),
+                        },
                     }
                 }
             }
             let mut dec: Option<Encrypt> = None;
             let mut ice = IceCount::default();
-            while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
+            loop {
+                let mut bytes = match first.take() {
+                    Some(bytes) => bytes,
+                    None => match timeout(30_000, b.next()).await {
+                        Ok(Some(Ok(bytes))) => bytes,
+                        _ => break,
+                    },
+                };
                 if let Some(dec) = dec.as_mut() {
                     if dec.dec(&mut bytes).is_err() {
                         log::debug!("Tcp connection from {:?} failed to decrypt", addr);
