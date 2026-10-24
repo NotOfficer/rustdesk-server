@@ -1,8 +1,10 @@
 // Differential test against the original hbbs: the same old-style message
 // sequences (no new fields, as clients up to 1.5.0 send them with UDP, IPv6
 // and WebRTC off) go to the original binary and to this one, and the observed
-// replies must be the same. Set HBBS_BASELINE_BIN to the original hbbs
-// (upstream 873230e); without it the test only reports that it was skipped.
+// replies must be the same. The tests need the original hbbs (upstream
+// 873230e) and are therefore ignored by a plain `cargo test`:
+//   HBBS_BASELINE_BIN=/path/to/original/hbbs cargo test --test compat -- --ignored
+// lab/run-all-tests.sh builds that binary and runs them.
 mod common;
 
 use common::*;
@@ -10,9 +12,11 @@ use hbb_common::{protobuf::Message as _, rendezvous_proto::*, tokio};
 use sodiumoxide::crypto::sign;
 use std::net::SocketAddr;
 
-fn baseline_bin() -> Option<String> {
-    let bin = std::env::var("HBBS_BASELINE_BIN").ok()?;
-    std::path::Path::new(&bin).exists().then_some(bin)
+fn baseline_bin() -> String {
+    let bin = std::env::var("HBBS_BASELINE_BIN")
+        .expect("set HBBS_BASELINE_BIN to the original hbbs binary");
+    assert!(std::path::Path::new(&bin).exists(), "{} does not exist", bin);
+    bin
 }
 
 /// What a client could observe, with addresses replaced by roles and
@@ -258,11 +262,9 @@ const ALL_OFF: [(&str, &str); 4] = [
 ];
 
 #[tokio::test]
+#[ignore = "needs HBBS_BASELINE_BIN, see the top of this file"]
 async fn old_style_requests_match_the_original() {
-    let Some(baseline) = baseline_bin() else {
-        eprintln!("HBBS_BASELINE_BIN not set, skipped");
-        return;
-    };
+    let baseline = baseline_bin();
     for version in ["1.4.0", "1.4.9", "1.5.0"] {
         compare(&baseline, &[], version, |_| {}).await;
         compare(&baseline, &ALL_OFF, version, |_| {}).await;
@@ -272,11 +274,9 @@ async fn old_style_requests_match_the_original() {
 // 1.4.9 sends udp_port and socket_addr_v6 with UDP/IPv6 on; with every switch
 // off they are dropped like the original does.
 #[tokio::test]
+#[ignore = "needs HBBS_BASELINE_BIN, see the top of this file"]
 async fn new_fields_with_switches_off_match_the_original() {
-    let Some(baseline) = baseline_bin() else {
-        eprintln!("HBBS_BASELINE_BIN not set, skipped");
-        return;
-    };
+    let baseline = baseline_bin();
     fn new_fields(r: &mut PunchHoleRequest) {
         r.udp_port = 40000;
         r.socket_addr_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());
@@ -291,11 +291,9 @@ async fn new_fields_with_switches_off_match_the_original() {
 // 1.4.x controllers send udp_port and socket_addr_v6 when UDP/IPv6 is on; with
 // the default switches they still get exactly what the original server did.
 #[tokio::test]
+#[ignore = "needs HBBS_BASELINE_BIN, see the top of this file"]
 async fn new_fields_from_1_4_controllers_match_the_original() {
-    let Some(baseline) = baseline_bin() else {
-        eprintln!("HBBS_BASELINE_BIN not set, skipped");
-        return;
-    };
+    let baseline = baseline_bin();
     fn udp_and_v6(r: &mut PunchHoleRequest) {
         r.udp_port = 40000;
         r.socket_addr_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());

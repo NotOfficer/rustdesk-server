@@ -445,6 +445,8 @@ async fn connected_controllers_keep_their_nat_test() {
     let req = test_nat_request();
     let server = hbbs.udp_addr();
     let _ctl = Tcp::connect(&hbbs, "127.9.9.10".parse().unwrap(), Kx::None).await;
+    // give the server time to accept the connection
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let connected = udp_socket("127.9.9.10".parse().unwrap()).await;
     let stranger = udp_socket("127.9.9.9".parse().unwrap()).await;
     // 30 other sources use up the global budget
@@ -483,8 +485,17 @@ async fn nat_test_retry_after_the_connect_is_answered() {
     udp.send_to(&req, server).await.unwrap();
     assert!(drain(&udp, 100).await.is_empty());
     let _ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
-    udp.send_to(&req, server).await.unwrap();
-    assert_eq!(drain(&udp, 500).await.len(), 1);
+    // like the client, retry until answered (the server may see the UDP
+    // request before it has accepted the TCP connection)
+    let mut answered = 0;
+    for _ in 0..5 {
+        udp.send_to(&req, server).await.unwrap();
+        answered = drain(&udp, 200).await.len();
+        if answered > 0 {
+            break;
+        }
+    }
+    assert_eq!(answered, 1);
 }
 
 // 1.4.x controllers send udp_port too, but their UDP attempt can hold up the

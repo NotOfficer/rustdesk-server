@@ -341,10 +341,13 @@ be abused to make a peer send packets to a third host:
 
 * `udp_port`: the peer punches the controller's **observed** IP with that
   port, so it cannot be pointed at another host.
-* `socket_addr_v6`: chosen by the controller. hbbs forwards only global
-  unicast addresses with a port, only from 1.5.0 controllers (whose punch
-  stops after 3 s), and at most 60 per controller IP in a burst, then 1 per
-  second. A request also needs the licence key and an online peer id.
+* `socket_addr_v6`: chosen by the controller. The controlled peer sends its
+  punch probes there: for up to 3 s (1.5.0, `punch_udp`) or 20 s (1.4.x,
+  about 100 datagrams). hbbs forwards only global unicast addresses with a
+  port, and at most 60 per controller IP in a burst, then 1 per second; a
+  request also needs the licence key and an online peer id. The "1.5.0 or
+  newer" check is about compatibility, not security: the version is
+  reported by the client itself.
 * ICE candidates: chosen by each side; the peer's ICE agent sends paced
   connectivity checks to them, as in any WebRTC implementation. Bounded by
   128 candidates per route and 64 routes per controller IP.

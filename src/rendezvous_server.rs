@@ -1462,8 +1462,13 @@ impl RendezvousServer {
         log::debug!("Tcp connection from {:?}, ws: {}", addr, ws);
         let mut rs = self.clone();
         let key = key.to_owned();
+        // a controller's UDP NAT test runs while it is connected, so count the
+        // host already on accept; WebSocket addresses can come from a header,
+        // so only plain TCP counts
+        let tcp_host = (!ws).then(|| self.tcp_hosts.enter(addr.ip()));
         tokio::spawn(async move {
             allow_err!(rs.handle_listener_inner(stream, addr, &key, ws).await);
+            drop(tcp_host);
         });
     }
 
@@ -1475,9 +1480,6 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
-        // a controller's UDP NAT test runs while it is connected; WebSocket
-        // addresses can come from a header, so only plain TCP counts
-        let _tcp_host = (!ws).then(|| self.tcp_hosts.enter(addr.ip()));
         let mut sink;
         if ws {
             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
