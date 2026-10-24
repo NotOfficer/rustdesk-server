@@ -143,3 +143,42 @@ No critical or major findings; two minor ones, both proven by the reviewer. The 
 | FINAL-8-2 | Candidates over the per-route budget (128 frames = 64 distinct candidates, sent twice) counted as misses; a host with more than ~72 candidates got the controller's signalling connection closed. | Valid (minor) | `b02ce34`: over-budget candidates are dropped quietly; only unmatched ones count as misses. Docs corrected. Test `over_budget_candidates_keep_the_connection`. |
 
 **Loop result:** 8 rounds. Valid findings per round: 4, 4, 2, 3, 3, 1, 1 (reconstructed), 2, all minor; no round was free of findings, so the loop ended at the cap, as specified.
+
+## Extra full reviews (requested by the user)
+
+After the loop, the user asked for two more independent full reviews of
+`873230e..baf26f6`, with the same brief and the same rules as the loop
+reviewers: one by GPT 6.1 Sol (reasoning effort xhigh), one by a fresh
+Opus 5.5 (effort xhigh).
+
+### GPT 6.1 Sol (`873230e..baf26f6`)
+
+Two findings, both proven with integration tests against hbbs with a licence
+key set. The four reproduction tests fail since the fix.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| GPT-1 | Anyone who knows a waiting controller's TCP address and the target id could reply first. A UDP `PunchHoleSent` from any host used up the route (answered without `is_udp`, see UDP-3), and a TCP reply from any host, even plaintext and without the licence key, could carry the WebRTC answer to an encrypted controller. The peer's real reply was then dropped. | Valid; minor rather than major: the attacker needs the controller's ephemeral TCP address at the right moment, and the controller still checks the peer's signed key, so the result is one failed transport attempt | `0e0e0e3`: a UDP `PunchHoleSent` from another host than the peer's registration is ignored and leaves the route open (this reverses UDP-3, see DECISIONS.md). The WebRTC answer only passes from the peer's registered host, never over WebSocket. Tests `hole_sent_from_another_host_is_ignored`, `answer_only_from_the_peer_host`. Remaining, as with the original server: a TCP reply from anywhere still reaches the controller, without answer or IPv6 address, and uses up its one response. |
+| GPT-2 | The peer's `socket_addr_v6` in `PunchHoleSent`, `LocalAddr` and `RelayResponse` went back to the controller with only the address check: also past `ALWAYS_USE_RELAY` (`PunchHoleSent`, `LocalAddr`), to 1.4.x controllers, and without the per-target limit. A modified peer could make controllers probe a chosen IPv6 host, or learn a relayed controller's IPv6 address. Proven: 80 replies naming one target forwarded to 1.4.9 controllers in under a second. | Valid (major: forced relay bypass) | `0e0e0e3`: the peer's IPv6 address goes back only where the controller's went to the peer (recorded in the route), only from the peer's registered host, and counts against the per-target limit. 1.4.9 and 1.5.0 peers only report one in that case, so genuine clients lose nothing. Tests `forced_relay_drops_v6`, `v6_reply_needs_the_controllers_v6_forwarded`, `v6_reply_only_from_the_peer_host`, `v6_replies_are_limited_per_target`. |
+
+### Opus 5.5 (`873230e..baf26f6`)
+
+No critical or major findings; four minor ones, three of them proven with
+probe tests. The reviewer confirmed the key exchange, the offer delay,
+WebSocket and port 21115 unchanged, WebRTC session binding and the one
+response per kept connection, UDP without any UDP reply, the licence key on
+every route, no panics on network data and no sensitive logging.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| OPUS-1 | A 1.4.x controlled peer whose replies leave from another IP than its registration (multi-WAN, NAT pool, v4/v6 mix) is never marked legacy, so 1.5.0 controllers keep sending it `udp_port` and IPv6; the docs said this only happens before its first reply. Proven with replies from 127.0.0.3. Suggested: set the mark from any host, clear it only from the registered one. | Valid (docs); the suggested fix not adopted | `ad34574`: docs and DECISIONS.md corrected. Setting the mark from any host would let any licensed client keep a 1.5.0 peer downgraded by forging replies to its own route, which FINAL-8-1 closed. The parallel TCP round still carries such connections; with TCP punching switched off on the controller, the original server does not TCP punch either. |
+| OPUS-2 | Anyone with the licence key can use up the IPv6 per-target budget of a victim's /64 (60, then 1/s) and so switch its IPv6 P2P off. Proven: after 61 foreign requests the victim's request went without its address. | Valid (minor) | `69e5c8e`: a target in the sender's own /64 counts only against the sender's budget, so a controller that reaches hbbs over IPv6 keeps its IPv6 P2P. Unit test `ipv6_targets_are_limited_unless_they_are_the_senders_own`. The suggested per-pair limit was not adopted: it needs a larger per-target cap and would weaken FINAL-5-1. Remaining: a controller on IPv4 can still be hit (only IPv6 P2P is lost). |
+| OPUS-3 | The docs say WebRTC needs the key on both sides, but with `udp_port` the 1.5.0 controlled side puts its answer into the UDP `PunchHoleSent` without a key exchange; the answer also crosses to hbbs in plaintext, which the security section did not mention. | Valid (docs) | `ad34574`: docs corrected, the plaintext UDP answer stated as a property of the client. |
+| OPUS-4 | A `RequestRelay` of ~65.5 KB (within the 64 KiB frame limit, beyond the 65,507-byte datagram limit) fails with EMSGSIZE; the framed socket keeps the frame and the main loop has to rebuild the UDP socket, losing replies meanwhile. Pre-existing (873230e had no frame limit at all). Proven from the log. | Valid (minor, pre-existing) | `2c63b33`: every message forwarded to a peer is written straight to the socket, like the NAT-test answer. Unit test `an_oversized_forward_does_not_block_the_socket` (fails with the old path). |
+
+While checking these fixes, one test failed once at its connect. The cause
+was in the test harness: hbbs binds port - 1 and port + 2 besides its port,
+but only the port itself was locked, so two tests starting at once could
+share a port through SO_REUSEPORT. `6110463` picks ports in aligned blocks
+of four. This is a likely cause of the one sporadic comparison test failure
+seen earlier.
