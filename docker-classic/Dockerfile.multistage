@@ -8,9 +8,10 @@ ENV OPENSSL_STATIC=1
 WORKDIR /src
 COPY . .
 ARG CARGO_BUILD_JOBS=8
+# no cache for target/: cargo compares file times, and a cached target/ from
+# another source tree can look newer than these sources
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} cargo build --release --locked \
         --bin hbbs --bin hbbr --bin rustdesk-utils \
     && mkdir -p /out \
