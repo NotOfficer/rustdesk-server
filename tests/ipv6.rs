@@ -172,10 +172,7 @@ async fn malformed_v6_is_dropped() {
 
 #[tokio::test]
 async fn websocket_controller_gets_no_v6() {
-    use hbb_common::{
-        futures_util::{SinkExt, StreamExt},
-        protobuf::Message as _,
-    };
+    use hbb_common::{futures_util::SinkExt, protobuf::Message as _};
     let hbbs = Hbbs::start(&[], &[]).await;
     let peer = Peer::register(&hbbs, "peer01").await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", hbbs.ws_addr()))
@@ -190,5 +187,89 @@ async fn websocket_controller_gets_no_v6() {
     .unwrap();
     let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
     assert!(ph.socket_addr_v6.is_empty());
-    drop(ws.next());
+}
+
+// 1.4.x controllers send their IPv6 address even when they force a relay
+// (/r ids, force-always-relay, proxy); forwarding it would bypass the relay.
+#[tokio::test]
+async fn controller_forced_relay_drops_v6_and_udp() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    let mut req = punch_hole_request("peer01", &hbbs.key);
+    req.socket_addr_v6 = v6(A_V6);
+    req.udp_port = 40000;
+    req.force_relay = true;
+    req.nat_type = NatType::SYMMETRIC.into();
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert!(ph.socket_addr_v6.is_empty());
+    assert_eq!(ph.udp_port, 0);
+    assert!(!ph.force_relay);
+}
+
+// 1.4.x waits up to 20 s for a failing IPv6 attempt before it relays.
+#[tokio::test]
+async fn v6_only_from_controllers_since_1_5_0() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    for (version, forwarded) in [
+        ("1.4.9", false),
+        ("1.4.0", false),
+        ("", false),
+        ("1.5.0", true),
+        ("1.5.1", true),
+        ("1.10.0", true),
+    ] {
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        let mut req = punch_hole_request("peer01", &hbbs.key);
+        req.socket_addr_v6 = v6(A_V6);
+        req.version = version.to_owned();
+        ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert_eq!(!ph.socket_addr_v6.is_empty(), forwarded, "version {:?}", version);
+    }
+}
+
+// Peers send punch probes to whatever IPv6 address they are given.
+#[tokio::test]
+async fn only_global_v6_targets_are_forwarded() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut mapped = "::ffff:1.2.3.4".parse::<std::net::Ipv6Addr>().unwrap().octets().to_vec();
+    mapped.extend_from_slice(&5u16.to_le_bytes());
+    let targets: Vec<Bytes> = vec![
+        v6("[::1]:40001"),
+        v6("[fe80::1]:40001"),
+        v6("[ff02::1]:40001"),
+        v6("[fd00::1]:40001"),
+        v6("[64:ff9b::102:304]:40001"),
+        v6("[2001:db8::a]:0"),
+        mapped.into(),
+    ];
+    for target in targets {
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        request(&hbbs, &mut ctl, "peer01", target.clone()).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert!(ph.socket_addr_v6.is_empty(), "{:?}", demangle(&target));
+        let _reply = punch_hole_sent(&hbbs, ph.socket_addr, "peer01", target).await;
+        let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+        assert!(res.socket_addr_v6.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn v6_forwards_are_limited_per_controller() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut forwarded = 0;
+    for _ in 0..70 {
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        request(&hbbs, &mut ctl, "peer01", v6(A_V6)).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        if !ph.socket_addr_v6.is_empty() {
+            forwarded += 1;
+        }
+    }
+    assert!((60..=62).contains(&forwarded), "{} forwarded", forwarded);
 }

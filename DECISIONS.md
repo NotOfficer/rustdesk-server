@@ -107,3 +107,21 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **TCP frame limit 64 KiB on 21116.** The legacy codec accepted frames up to
   1 GiB. The largest legitimate rendezvous message is a `PunchHoleRequest`
   with an offer and a token (a few KiB).
+- **Key exchange offered after 100 ms of silence** (review finding KX-1). The
+  controlled side's plaintext connections close right after sending; an
+  unread offer would turn that close into a TCP reset. Costs key-exchanging
+  clients 100 ms per connection.
+- **IPv6 only from 1.5.0 controllers** (review finding IPV6-3). 1.4.x
+  controllers send `socket_addr_v6`, but their IPv6 attempt can hold up the
+  relay fallback for up to 20 s, a regression against the original server.
+  1.4.x controllers therefore keep the old behavior; 1.4.x controlled peers
+  still take part in IPv6 with a 1.5.0 controller. The version is parsed
+  with a local, overflow-free function, because hbb_common's
+  `get_version_number` multiplies without bounds on untrusted input.
+- **No UDP or IPv6 when the controller sets `force_relay`** (IPV6-1). The
+  offer still travels with `force_relay`, because the WebRTC peer then uses a
+  relay-only ICE policy.
+- **IPv6 targets: global unicast only, rate-limited per controller IP**
+  (IPV6-2). A same-/64 check against the controller's TCP address was not
+  added: most controllers reach hbbs over IPv4, and multi-homed hosts would
+  lose IPv6.

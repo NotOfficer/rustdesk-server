@@ -30,7 +30,10 @@ const TEST_NAT_BURST: f64 = 20.0;
 const TEST_NAT_RATE: f64 = 10.0;
 const TEST_NAT_GLOBAL_BURST: f64 = 4000.0;
 const TEST_NAT_GLOBAL_RATE: f64 = 2000.0;
-const TEST_NAT_SOURCES: usize = 65_536;
+// IPv6 addresses a controller IP (IPv6: /64) may hand to peers
+const IPV6_FORWARD_BURST: f64 = 60.0;
+const IPV6_FORWARD_RATE: f64 = 1.0;
+const LIMITER_SOURCES: usize = 65_536;
 
 struct WebRtc {
     // DTLS fingerprint of the offer, the clients' ICE session key
@@ -282,26 +285,42 @@ impl Bucket {
     }
 }
 
-/// Token buckets for the UDP TestNatRequest answers. Its source address can be
-/// spoofed, so every answer is a packet to a possible victim: limit them per
-/// source and in total. When the source table is full, unknown sources are
-/// refused.
-pub(crate) struct TestNatLimiter {
+/// Token buckets per source IP (IPv6: per /64), and optionally in total. When
+/// the source table is full, unknown sources are refused.
+pub(crate) struct RateLimiter {
+    burst: f64,
+    rate: f64,
+    global: Option<(f64, f64)>,
     inner: Mutex<(Bucket, HashMap<IpAddr, Bucket>)>,
 }
 
-impl Default for TestNatLimiter {
-    fn default() -> Self {
+impl RateLimiter {
+    fn new(burst: f64, rate: f64, global: Option<(f64, f64)>) -> Self {
+        let global_burst = global.map(|g| g.0).unwrap_or_default();
         Self {
-            inner: Mutex::new((
-                Bucket::full(Instant::now(), TEST_NAT_GLOBAL_BURST),
-                HashMap::new(),
-            )),
+            burst,
+            rate,
+            global,
+            inner: Mutex::new((Bucket::full(Instant::now(), global_burst), HashMap::new())),
         }
     }
-}
 
-impl TestNatLimiter {
+    /// UDP TestNatRequest answers. Their source can be spoofed, so every answer
+    /// is a packet to a possible victim.
+    pub(crate) fn test_nat() -> Self {
+        Self::new(
+            TEST_NAT_BURST,
+            TEST_NAT_RATE,
+            Some((TEST_NAT_GLOBAL_BURST, TEST_NAT_GLOBAL_RATE)),
+        )
+    }
+
+    /// IPv6 addresses forwarded from a controller: the peer sends punch probes
+    /// to whatever address the controller names.
+    pub(crate) fn ipv6_forward() -> Self {
+        Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None)
+    }
+
     pub(crate) fn allow(&self, ip: IpAddr) -> bool {
         self.allow_at(Instant::now(), ip)
     }
@@ -316,20 +335,46 @@ impl TestNatLimiter {
         };
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (global, sources) = &mut *guard;
-        if !sources.contains_key(&source) && sources.len() >= TEST_NAT_SOURCES {
+        if !sources.contains_key(&source) && sources.len() >= LIMITER_SOURCES {
             // a bucket that has refilled is the same as none
-            let refill = Duration::from_secs_f64(TEST_NAT_BURST / TEST_NAT_RATE);
+            let refill = Duration::from_secs_f64(self.burst / self.rate);
             sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
-            if sources.len() >= TEST_NAT_SOURCES {
+            if sources.len() >= LIMITER_SOURCES {
                 return false;
             }
         }
         let bucket = sources
             .entry(source)
-            .or_insert_with(|| Bucket::full(now, TEST_NAT_BURST));
-        bucket.take(now, TEST_NAT_RATE, TEST_NAT_BURST)
-            && global.take(now, TEST_NAT_GLOBAL_RATE, TEST_NAT_GLOBAL_BURST)
+            .or_insert_with(|| Bucket::full(now, self.burst));
+        bucket.take(now, self.rate, self.burst)
+            && self
+                .global
+                .map(|(burst, rate)| global.take(now, rate, burst))
+                .unwrap_or(true)
     }
+}
+
+/// Whether a mangled IPv6 socket address is worth forwarding: a global unicast
+/// address (2000::/3, what clients detect as public) with a port.
+pub(crate) fn global_v6(bytes: &[u8]) -> bool {
+    match decode_addr(bytes) {
+        Some(SocketAddr::V6(addr)) if bytes.len() == 18 => {
+            addr.port() != 0 && addr.ip().segments()[0] & 0xe000 == 0x2000
+        }
+        _ => false,
+    }
+}
+
+/// Whether a client version ("1.5.0", "1.5.0-2") is at least `min`.
+pub(crate) fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let mut parts = version
+        .split('-')
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .map(|x| x.trim().parse::<u32>().unwrap_or(0));
+    let mut next = || parts.next().unwrap_or(0);
+    (next(), next(), next()) >= min
 }
 
 /// Whether a UDP answer to `addr` may be sent at all.
@@ -564,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_nat_is_limited_per_source_and_in_total() {
-        let limiter = TestNatLimiter::default();
+        let limiter = RateLimiter::test_nat();
         let t0 = Instant::now();
         let a: IpAddr = "1.2.3.4".parse().unwrap();
         let n = (0..100).filter(|_| limiter.allow_at(t0, a)).count();
@@ -584,7 +629,7 @@ mod tests {
         assert_eq!(n, TEST_NAT_BURST as usize);
         assert!(limiter.allow_at(t0, v6("2001:db8:0:1::1")));
         // the global bucket caps all sources together
-        let limiter = TestNatLimiter::default();
+        let limiter = RateLimiter::test_nat();
         let mut n = 0;
         for i in 0..(TEST_NAT_GLOBAL_BURST as u32 + 100) {
             if limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))) {
@@ -596,18 +641,62 @@ mod tests {
 
     #[test]
     fn test_nat_source_table_is_bounded() {
-        let limiter = TestNatLimiter::default();
+        let limiter = RateLimiter::test_nat();
         let t0 = Instant::now();
-        for i in 0..TEST_NAT_SOURCES as u32 {
+        for i in 0..LIMITER_SOURCES as u32 {
             limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)));
         }
-        let len = |l: &TestNatLimiter| l.inner.lock().unwrap().1.len();
-        assert_eq!(len(&limiter), TEST_NAT_SOURCES);
+        let len = |l: &RateLimiter| l.inner.lock().unwrap().1.len();
+        assert_eq!(len(&limiter), LIMITER_SOURCES);
         // full: a new source is refused until old buckets have refilled
         assert!(!limiter.allow_at(t0, "1.1.1.1".parse().unwrap()));
-        assert_eq!(len(&limiter), TEST_NAT_SOURCES);
+        assert_eq!(len(&limiter), LIMITER_SOURCES);
         assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap()));
         assert_eq!(len(&limiter), 1);
+    }
+
+    #[test]
+    fn ipv6_forwards_are_limited_per_controller() {
+        let limiter = RateLimiter::ipv6_forward();
+        let t0 = Instant::now();
+        let a: IpAddr = "1.2.3.4".parse().unwrap();
+        let n = (0..100).filter(|_| limiter.allow_at(t0, a)).count();
+        assert_eq!(n, IPV6_FORWARD_BURST as usize);
+        assert!(limiter.allow_at(t0 + Duration::from_secs(1), a));
+        // no global cap
+        for i in 0..1000u32 {
+            assert!(limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))));
+        }
+    }
+
+    #[test]
+    fn only_global_v6_with_a_port_is_forwarded() {
+        let m = |s: &str| AddrMangle::encode(s.parse::<SocketAddr>().unwrap());
+        assert!(global_v6(&m("[2001:db8::1]:40000")));
+        assert!(global_v6(&m("[2a00:1450::5]:1")));
+        for bad in ["[2001:db8::1]:0", "[::1]:5", "[fe80::1]:5", "[fd00::1]:5", "[ff02::1]:5", "[64:ff9b::102:304]:5"] {
+            assert!(!global_v6(&m(bad)), "{}", bad);
+        }
+        // a v4-mapped address in the raw 18-byte form, and a mangled IPv4
+        let mut mapped = "::ffff:1.2.3.4".parse::<Ipv6Addr>().unwrap().octets().to_vec();
+        mapped.extend_from_slice(&5u16.to_le_bytes());
+        assert!(!global_v6(&mapped));
+        assert!(!global_v6(&m("1.2.3.4:5")));
+        assert!(!global_v6(&[0x20u8; 17]));
+    }
+
+    #[test]
+    fn versions_compare_by_number() {
+        assert!(version_at_least("1.5.0", (1, 5, 0)));
+        assert!(version_at_least("1.5.1", (1, 5, 0)));
+        assert!(version_at_least("1.10.0", (1, 5, 0)));
+        assert!(version_at_least("2.0", (1, 5, 0)));
+        assert!(version_at_least("1.5.0-3", (1, 5, 0)));
+        assert!(!version_at_least("1.4.9", (1, 5, 0)));
+        assert!(!version_at_least("", (1, 5, 0)));
+        assert!(!version_at_least("abc", (1, 5, 0)));
+        assert!(!version_at_least("99999999999999999999.1", (1, 5, 0)));
+        assert!(!version_at_least("1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1", (1, 5, 0)));
     }
 
     #[test]

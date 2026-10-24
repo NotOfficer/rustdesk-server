@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::key_exchange;
 use crate::peer::*;
-use crate::punch::{self, PunchRoutes, TestNatLimiter};
+use crate::punch::{self, PunchRoutes, RateLimiter};
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -125,7 +125,8 @@ struct IceCount {
 pub struct RendezvousServer {
     tcp_punch: Arc<Mutex<HashMap<SocketAddr, SharedSink>>>,
     routes: Arc<PunchRoutes>,
-    test_nat: Arc<TestNatLimiter>,
+    test_nat: Arc<RateLimiter>,
+    ipv6_forward: Arc<RateLimiter>,
     pm: PeerMap,
     tx: Sender,
     relay_servers: Arc<RelayServers>,
@@ -182,7 +183,8 @@ impl RendezvousServer {
         let mut rs = Self {
             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
             routes: Default::default(),
-            test_nat: Default::default(),
+            test_nat: Arc::new(RateLimiter::test_nat()),
+            ipv6_forward: Arc::new(RateLimiter::ipv6_forward()),
             pm,
             tx: tx.clone(),
             relay_servers: Default::default(),
@@ -903,11 +905,19 @@ impl RendezvousServer {
             let socket_addr = AddrMangle::encode(addr).into();
             // IPv6 and WebRTC would bypass a forced relay; WebSocket clients keep the old behavior
             let p2p = !ws && !relay_forced;
-            let socket_addr_v6 = if p2p {
-                forward_v6(&ph.socket_addr_v6)
-            } else {
-                Default::default()
-            };
+            // UDP and IPv6 would also bypass a relay the controller asked for itself;
+            // WebRTC then stays relayed by its own ICE policy
+            let direct = p2p && !ph.force_relay;
+            let mut socket_addr_v6 = Bytes::new();
+            // 1.4.x controllers wait up to 20 s for a failing IPv6 attempt before
+            // they relay (punch_udp), so IPv6 starts with 1.5.0
+            if direct && punch::version_at_least(&ph.version, (1, 5, 0)) {
+                socket_addr_v6 = forward_v6(&ph.socket_addr_v6);
+                if !socket_addr_v6.is_empty() && !self.ipv6_forward.allow(addr.ip()) {
+                    log::debug!("Too many IPv6 punch requests from {:?}", addr);
+                    socket_addr_v6 = Bytes::new();
+                }
+            }
             let mut session_key = None;
             if p2p && WEBRTC.load(Ordering::SeqCst) && !ph.webrtc_sdp_offer.is_empty() {
                 session_key = punch::offer_session_key(&ph.webrtc_sdp_offer);
@@ -920,7 +930,7 @@ impl RendezvousServer {
                 }
             }
             // FetchLocalAddr has no udp_port
-            let udp = p2p
+            let udp = direct
                 && UDP_PUNCH.load(Ordering::SeqCst)
                 && (1..=u16::MAX as i32).contains(&ph.udp_port)
                 && (!same_intranet || session_key.is_some());
@@ -1640,9 +1650,10 @@ impl RendezvousServer {
     }
 }
 
-// Only well-formed IPv6 addresses are passed on, and only while IPv6 punching is on.
+// Only global IPv6 addresses with a port are passed on, and only while IPv6
+// punching is on.
 fn forward_v6(addr: &Bytes) -> Bytes {
-    if IPV6_PUNCH.load(Ordering::SeqCst) && addr.len() == MANGLED_V6_LEN {
+    if IPV6_PUNCH.load(Ordering::SeqCst) && addr.len() == MANGLED_V6_LEN && punch::global_v6(addr) {
         addr.clone()
     } else {
         Bytes::new()

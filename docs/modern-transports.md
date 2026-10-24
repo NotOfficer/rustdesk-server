@@ -140,12 +140,25 @@ A <-udp-> B          "RDP?"/"RDP!" probes, then KCP
   `PunchHoleRequest.socket_addr_v6` (self-reported, client.rs:508). Only
   global addresses (2000::/3) or a STUN result are used (common.rs:2633).
 * hbbs copies it into `PunchHole.socket_addr_v6`, or `FetchLocalAddr.socket_addr_v6`
-  in the same-intranet case.
+  in the same-intranet case, under these conditions:
+  * the controller is 1.5.0 or newer (`PunchHoleRequest.version`). 1.4.x
+    controllers also send the field, but their IPv6 attempt
+    (`udp_nat_connect`, `punch_udp` with a 20 s limit) holds up the relay
+    fallback for up to 20 s when IPv6 does not work, which the original
+    server never caused;
+  * the controller did not ask for a relay itself (`force_relay`; 1.4.x sends
+    its address even then);
+  * the address is global unicast (2000::/3) with a port, which is all a
+    genuine client reports;
+  * the controller's IP has not handed out more than 60 addresses in a burst
+    (1 per second after that), because the peer sends punch probes to
+    whatever address it gets.
 * B opens a v6 UDP listener and reports it in `PunchHoleSent.socket_addr_v6`,
   `LocalAddr.socket_addr_v6` or `RelayResponse.socket_addr_v6`.
 * hbbs copies that into `PunchHoleResponse.socket_addr_v6` or
-  `RelayResponse.socket_addr_v6`. A starts an "IPv6" KCP attempt when the
-  port is non-zero (client.rs:1028, 1049).
+  `RelayResponse.socket_addr_v6`, again only global unicast with a port. A
+  starts an "IPv6" KCP attempt when the port is non-zero (client.rs:1028,
+  1049).
 
 ### 1.6 WebRTC
 
@@ -228,7 +241,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 | (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 100 ms (`SECURE_TCP`) |
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
-| `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route |
+| `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; v6 only from 1.5.0 controllers |
 | `PunchHoleSent` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` if it belongs to A's WebRTC route |
 | `PunchHoleSent` | UDP | if it matches an open UDP route: `PunchHoleResponse { socket_addr = observed UDP source, is_udp }` to A over TCP; otherwise ignored |
 | `LocalAddr` | TCP | forward `socket_addr_v6` |
@@ -281,6 +294,25 @@ send more, or anything to a third address.
   cannot be spoofed, has passed the licence key check, and is limited by the
   route's budgets.
 
+### 3.1a Addresses the peers punch
+
+The peers themselves send probes to addresses that travel through hbbs. That
+is how hole punching works, and the same in RustDesk Server Pro, but it can
+be abused to make a peer send packets to a third host:
+
+* `udp_port`: the peer punches the controller's **observed** IP with that
+  port, so it cannot be pointed at another host.
+* `socket_addr_v6`: chosen by the controller. hbbs forwards only global
+  unicast addresses with a port, only from 1.5.0 controllers (whose punch
+  stops after 3 s), and at most 60 per controller IP in a burst, then 1 per
+  second. A request also needs the licence key and an online peer id.
+* ICE candidates: chosen by each side; the peer's ICE agent sends paced
+  connectivity checks to them, as in any WebRTC implementation. Bounded by
+  128 candidates per route and 64 routes per controller IP.
+* A forged TCP `PunchHoleSent` could carry an arbitrary `socket_addr_v6` to a
+  controller whose address it knows. hbbs only forwards a global unicast
+  address; the window is the few seconds the controller waits.
+
 ### 3.2 Bounded state
 
 | State | Bound |
@@ -326,7 +358,7 @@ send more, or anything to a third address.
 | Client | Effect |
 |---|---|
 | 1.5.0 | all four features work when the controller enables them |
-| 1.4.9 | no WebRTC, no v1 exchange. UDP and IPv6 work. 1.4.9 takes `udp_port` also from STUN, so it already sent `udp_port > 0` to the original hbbs, which dropped it; now it is forwarded. A 1.4.9 controller with UDP explicitly on therefore uses UDP punching. Its TCP fallback round is unchanged. |
+| 1.4.9 | no WebRTC, no v1 exchange, no IPv6 as controller (see 1.5); as controlled side IPv6 works. UDP works: 1.4.9 takes `udp_port` also from STUN, so it already sent `udp_port > 0` to the original hbbs, which dropped it; now it is forwarded. A 1.4.9 controller with UDP explicitly on therefore tries UDP punching; its parallel TCP fallback round is unchanged and returns first if UDP fails. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
 | all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |

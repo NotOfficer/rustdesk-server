@@ -24,6 +24,7 @@ pub const PEER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
 pub struct Hbbs {
     child: Child,
+    _port: PortLock,
     pub dir: tempfile::TempDir,
     pub port: u16,
     // base64 public key, what clients configure as `key`
@@ -38,11 +39,40 @@ fn port_set_free(port: u16) -> bool {
     tcp(port - 1) && tcp(port) && tcp(port + 2) && udp
 }
 
-fn free_port() -> u16 {
+// hbbs binds with SO_REUSEPORT, so two test processes (or two tests) that pick
+// the same port would share it. A lock file per port keeps the pick exclusive.
+struct PortLock(std::path::PathBuf);
+
+impl Drop for PortLock {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).ok();
+    }
+}
+
+fn free_port() -> (u16, PortLock) {
+    let dir = std::env::temp_dir().join("hbbs-test-ports");
+    std::fs::create_dir_all(&dir).ok();
     loop {
         let port = 20_000 + (rand_u32() % 40_000) as u16;
+        let path = dir.join(port.to_string());
+        let stale = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|e| e.as_secs() > 600).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            std::fs::remove_file(&path).ok();
+        }
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .is_err()
+        {
+            continue;
+        }
+        let lock = PortLock(path);
         if port_set_free(port) {
-            return port;
+            return (port, lock);
         }
     }
 }
@@ -57,7 +87,7 @@ impl Hbbs {
     pub async fn start(envs: &[(&str, &str)], args: &[&str]) -> Hbbs {
         sodiumoxide::init().ok();
         for _ in 0..20 {
-            let port = free_port();
+            let (port, port_lock) = free_port();
             let dir = tempfile::tempdir().unwrap();
             let log = std::fs::File::create(dir.path().join("hbbs.log")).unwrap();
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_hbbs"));
@@ -110,6 +140,7 @@ impl Hbbs {
                 .unwrap_or(sign::PublicKey([0u8; 32]));
             return Hbbs {
                 child,
+                _port: port_lock,
                 dir,
                 port,
                 key,
