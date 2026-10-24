@@ -115,3 +115,11 @@ No critical or major findings. The reviewer also fuzzed UDP and TCP (plaintext, 
 | FINAL-5-1 | The IPv6 forward limit counts only per controller: several licensed controller IPs (or /64s) can all name the same victim address, and every forward makes a peer probe it (19 probes over 3 s for 1.5.0, up to 100 over 20 s for 1.4.x). Proven: 3 sources × 60 = 180 forwards in 0.09 s. | Valid (minor) | `e1d620e`: a second limiter per target /64 (burst 60, 1/s), refusing unknown targets when full. Test `v6_forwards_are_limited_per_target`. |
 | FINAL-5-2 | The NAT-test budget is charged per datagram; a client's test costs 5-7 answers, so a few controllers behind one public IP (office, CGNAT) run out after ~3 attempts and silently lose UDP punching. Proven: answers per attempt [7, 7, 7, 5, 2]. | Valid (minor) | `e1d620e`: per-IP budget raised to burst 60, 30/s (still one small answer per request, global cap unchanged). |
 | FINAL-5-3 | Proven sources are still inserted into a full NAT-test limiter table, so it can grow past 65,536 (bounded only by open TCP connections); the doc's "fail closed" and table size were inaccurate. | Valid (minor) | `e1d620e`: no insertion past the cap; a proven source is then held to the global budget. Unit test in `source_table_is_bounded`; docs corrected. |
+
+### Round 6 (`873230e..b905940`)
+
+No critical or major findings; one minor. The reviewer also fuzzed all new message types over UDP, plain TCP and encrypted TCP (v0/v1): no crash, no panic.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-6-1 | A 1.5.0 controller's `udp_port`/IPv6 reach a 1.4.1-1.4.9 controlled side, which then punches UDP only (no TCP punch) with probes 1.5.0 does not answer (`RDP?`/`RDP!` are new in 1.5.0): the round ends on the relay after ~3 s instead of the original TCP punch; the parallel TCP round usually wins, but not if TCP punching takes longer. Verified in the client code. | Valid (minor) | `8c1a1ff`: hbbs remembers (in memory) a peer whose reply from its registered host reports a version below 1.5.0 and then withholds `udp_port` and IPv6 from it. Test `legacy_controlled_side_gets_no_udp_port_after_its_reply`. Residual: the first contact after a server start (documented). |
