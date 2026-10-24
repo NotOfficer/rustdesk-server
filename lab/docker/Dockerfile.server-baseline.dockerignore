@@ -1,0 +1,11 @@
+# Used by BuildKit instead of the context's .dockerignore (Dockerfile-specific
+# ignore file). Same as the repo's untracked .dockerignore except that the
+# tracked db_v2.sqlite3 is kept: .env sets DATABASE_URL=sqlite://./db_v2.sqlite3
+# and the sqlx query! macros open it at compile time ("unable to open database
+# file" without it).
+target
+.git
+lab/.cache
+lab/out
+db_v2.sqlite3-*
+id_ed25519*

@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Lab copy of docker-classic/Dockerfile.multistage, identical except for the
+# BuildKit cache mount ids. The original uses the default ids (= mount target),
+# so its /src/target cache is shared with every other build of the same
+# Dockerfile, e.g. the modern image built from the working tree. Cargo decides
+# freshness of path crates by mtime, and `git archive` exports files with the
+# (old) commit time, so a baseline build in the shared cache reused the
+# modern tree's hbb_common build-script output (protos::message missing) and
+# failed; in the other direction it could poison the modern build. The lab
+# therefore builds the baseline in its own caches (ids rdlab-*).
+FROM rust:1.93-alpine AS builder
+RUN apk add --no-cache musl-dev make perl pkgconf openssl-dev openssl-libs-static
+ENV OPENSSL_STATIC=1
+WORKDIR /src
+COPY . .
+ARG CARGO_BUILD_JOBS=8
+RUN --mount=type=cache,id=rdlab-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=rdlab-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=rdlab-baseline-target,target=/src/target \
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} cargo build --release --locked \
+        --bin hbbs --bin hbbr --bin rustdesk-utils \
+    && mkdir -p /out \
+    && cp target/release/hbbs target/release/hbbr target/release/rustdesk-utils /out/
+
+FROM scratch
+COPY --from=builder /out/hbbs /usr/bin/hbbs
+COPY --from=builder /out/hbbr /usr/bin/hbbr
+COPY --from=builder /out/rustdesk-utils /usr/bin/rustdesk-utils
+WORKDIR /root
+ENV HOME=/root

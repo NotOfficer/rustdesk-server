@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# Headless RustDesk client for the lab: ubuntu 24.04 + official .deb + Xvfb.
+# Build (done by run-lab.sh):
+#   docker build -f lab/docker/Dockerfile.client \
+#     --build-context debs=lab/.cache/<ver> --build-arg RD_DEB=rustdesk-<ver>-x86_64-sciter.deb \
+#     -t rdlab-client:<ver>-sciter lab/docker
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+ARG RD_DEB
+# xvfb: display for the GUI and for screen capture on the controlled side.
+# dbus-x11: dbus-launch (session bus; Flutter/GTK want one).
+# libgl1-mesa-dri/libegl1/libgles2: software GL for the Flutter variant.
+# libayatana-appindicator3-1: `rustdesk --server` spawns `--tray`, which panics without it.
+# procps: pkill/pgrep (rustdesk itself calls pkill), iproute2: ip/ss for debugging.
+RUN --mount=type=bind,from=debs,target=/debs \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xvfb xauth dbus dbus-x11 x11-utils procps iproute2 ca-certificates \
+        libgl1-mesa-dri libegl1 libgles2 fonts-dejavu-core libayatana-appindicator3-1 \
+        "/debs/${RD_DEB}" \
+    && rm -rf /var/lib/apt/lists/*
+ARG RDLAB_CLIENT_REV=dev
+LABEL rdlab.client.rev=${RDLAB_CLIENT_REV}
+COPY client-entrypoint.sh /usr/local/bin/rdlab-client
+RUN chmod 0755 /usr/local/bin/rdlab-client
+ENV HOME=/root DISPLAY=:0
+WORKDIR /root
+ENTRYPOINT ["/usr/local/bin/rdlab-client"]

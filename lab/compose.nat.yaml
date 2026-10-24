@@ -1,0 +1,106 @@
+# "nat" topology overlay: sudo docker compose -p rdlab -f lab/compose.yaml -f lab/compose.nat.yaml ...
+# Each client sits in its own LAN behind a router container that does IPv4 NAT
+# (MASQUERADE) and routes IPv6 with a stateful firewall (no NAT66), like a home
+# router. Servers and STUN stay on the WAN network. Docker puts its own gateway on
+# .1 of every network, so the routers use .254.
+
+x-router: &router
+  image: ${RDLAB_ROUTER_IMAGE:-rdlab-router:latest}
+  cap_add: [NET_ADMIN]
+  sysctls:
+    net.ipv4.ip_forward: "1"
+    net.ipv6.conf.all.forwarding: "1"
+    # 0 = strict TCP window tracking (Linux default, e.g. OpenWrt); 1 = liberal
+    net.netfilter.nf_conntrack_tcp_be_liberal: "${RDLAB_CT_LIBERAL:-0}"
+  cpus: 1
+  mem_limit: 256m
+
+# WAN hosts need a return route to the (non-NATed) LAN IPv6 prefixes; this helper
+# joins their network namespace and adds it, then exits.
+x-routes: &routes
+  image: ${RDLAB_ROUTER_IMAGE:-rdlab-router:latest}
+  command: ["routes"]
+  cap_add: [NET_ADMIN]
+  restart: "no"
+  cpus: 1
+  environment:
+    ROUTES6: "2001:db8:11::/64 via 2001:db8:10::31;2001:db8:12::/64 via 2001:db8:10::32"
+
+networks:
+  lan1:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 192.168.11.0/24
+        - subnet: 2001:db8:11::/64
+  lan2:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 192.168.12.0/24
+        - subnet: 2001:db8:12::/64
+
+services:
+  router1:
+    <<: *router
+    environment:
+      WAN_NET4: "198.18.10."
+      LAN_V4: 192.168.11.0/24
+      LAN_V6: 2001:db8:11::/64
+      ROUTES6: "2001:db8:12::/64 via 2001:db8:10::32"
+      V6_FIREWALL: ${RDLAB_V6_FIREWALL:-1}
+      WAN_INPUT: ${RDLAB_WAN_INPUT:-drop}
+    networks:
+      wan:
+        ipv4_address: 198.18.10.31
+        ipv6_address: 2001:db8:10::31
+      lan1:
+        ipv4_address: 192.168.11.254
+        ipv6_address: 2001:db8:11::254
+
+  router2:
+    <<: *router
+    environment:
+      WAN_NET4: "198.18.10."
+      LAN_V4: 192.168.12.0/24
+      LAN_V6: 2001:db8:12::/64
+      ROUTES6: "2001:db8:11::/64 via 2001:db8:10::31"
+      V6_FIREWALL: ${RDLAB_V6_FIREWALL:-1}
+      WAN_INPUT: ${RDLAB_WAN_INPUT:-drop}
+    networks:
+      wan:
+        ipv4_address: 198.18.10.32
+        ipv6_address: 2001:db8:10::32
+      lan2:
+        ipv4_address: 192.168.12.254
+        ipv6_address: 2001:db8:12::254
+
+  hbbs-routes:
+    <<: *routes
+    network_mode: "service:hbbs"
+  hbbr-routes:
+    <<: *routes
+    network_mode: "service:hbbr"
+  stun-routes:
+    <<: *routes
+    network_mode: "service:stun"
+
+  controlled:
+    environment:
+      RD_GW4: 192.168.11.254
+      RD_GW6: 2001:db8:11::254
+    networks: !override
+      lan1:
+        ipv4_address: 192.168.11.10
+        ipv6_address: 2001:db8:11::10
+
+  controller:
+    environment:
+      RD_GW4: 192.168.12.254
+      RD_GW6: 2001:db8:12::254
+    networks: !override
+      lan2:
+        ipv4_address: 192.168.12.10
+        ipv6_address: 2001:db8:12::10

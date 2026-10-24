@@ -1,0 +1,6 @@
+# NAT router / netns helper for the lab's "nat" topology.
+FROM alpine:3.22
+RUN apk add --no-cache iptables ip6tables iproute2 conntrack-tools
+COPY router.sh /usr/local/bin/rdlab-router
+RUN chmod 0755 /usr/local/bin/rdlab-router
+ENTRYPOINT ["/usr/local/bin/rdlab-router"]

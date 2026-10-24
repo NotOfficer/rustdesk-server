@@ -1,0 +1,122 @@
+# RustDesk transport lab. Always run with project name rdlab:
+#   sudo docker compose -p rdlab -f lab/compose.yaml ...
+# run-lab.sh sets all RDLAB_* / RD_* variables; see lab/README.md.
+#
+# Flat topology: everything sits on one "WAN" network without internet access
+# (internal: true), dual stack. 198.18.0.0/15 (benchmark range) and
+# 2001:db8::/32 (documentation range) look public to the client: its IPv6 code
+# only wants an address in 2000::/3 (src/common.rs test_ipv6).
+# No ports are published on the host.
+
+name: rdlab
+
+x-limits: &limits
+  cpus: ${RDLAB_CPUS:-2}
+  mem_limit: 2g
+  pids_limit: 2048
+
+x-client-env: &client-env
+  RD_SERVER: ${RDLAB_HBBS_V4:-198.18.10.10}
+  RD_RELAY: ${RDLAB_HBBR_V4:-198.18.10.11}
+  RD_KEY: ${RDLAB_KEY:-}
+  RD_PASSWORD: ${RDLAB_PASSWORD:-rdlab-Passw0rd}
+
+# The client's default STUN hosts (libs/hbb_common/src/webrtc.rs DEFAULT_ICE_SERVERS, also
+# used by the IPv6 probe in src/common.rs) resolve to the local coturn, v4 and v6.
+x-stun-hosts: &stun-hosts
+  - "stun.cloudflare.com=198.18.10.3"
+  - "stun.l.google.com=198.18.10.3"
+  - "stun.antisip.com=198.18.10.3"
+  - "stun.nextcloud.com=198.18.10.3"
+  - "stun.cloudflare.com=2001:db8:10::3"
+  - "stun.l.google.com=2001:db8:10::3"
+  - "stun.antisip.com=2001:db8:10::3"
+  - "stun.nextcloud.com=2001:db8:10::3"
+
+networks:
+  wan:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 198.18.10.0/24
+        - subnet: 2001:db8:10::/64
+
+services:
+  hbbs:
+    image: ${RDLAB_SERVER_IMAGE:-rustdesk-server-baseline:873230e}
+    command: ["hbbs", "-r", "${RDLAB_HBBR_V4:-198.18.10.11}:21117"]
+    env_file:
+      - path: ${RDLAB_HBBS_ENV_FILE:-/dev/null}
+        required: false
+    <<: *limits
+    networks:
+      wan:
+        ipv4_address: ${RDLAB_HBBS_V4:-198.18.10.10}
+        ipv6_address: 2001:db8:10::10
+
+  hbbr:
+    image: ${RDLAB_SERVER_IMAGE:-rustdesk-server-baseline:873230e}
+    command: ["hbbr"]
+    <<: *limits
+    networks:
+      wan:
+        ipv4_address: ${RDLAB_HBBR_V4:-198.18.10.11}
+        ipv6_address: 2001:db8:10::11
+
+  # STUN only (no TURN): a WebRTC win must be a real P2P pair. Listens on every
+  # port the default STUN URLs use: 3478 (main) plus aux endpoints 19302 and 443.
+  stun:
+    image: coturn/coturn:latest
+    entrypoint: ["turnserver"]
+    command:
+      - "-n"
+      - "--stun-only"
+      - "--no-tls"
+      - "--listening-port=3478"
+      - "--aux-server=198.18.10.3:19302"
+      - "--aux-server=198.18.10.3:443"
+      - "--aux-server=[2001:db8:10::3]:19302"
+      - "--aux-server=[2001:db8:10::3]:443"
+      - "--pidfile=/tmp/turnserver.pid"
+      - "--log-file=stdout"
+      - "--simple-log"
+      - "--verbose"
+    <<: *limits
+    networks:
+      wan:
+        ipv4_address: 198.18.10.3
+        ipv6_address: 2001:db8:10::3
+
+  controlled:
+    image: ${RDLAB_CLIENT_IMAGE_CONTROLLED:-rdlab-client:1.5.0-sciter}
+    environment:
+      <<: *client-env
+      RD_ROLE: controlled
+      RD_LOCAL_OPTS: ${RDLAB_CONTROLLED_LOCAL_OPTS:-}
+      RD_OPTS: ${RDLAB_CONTROLLED_OPTS:-}
+    extra_hosts: *stun-hosts
+    cap_add: [NET_ADMIN]   # only for the on-link IPv6 default route inside the container
+    <<: *limits
+    shm_size: 256m
+    networks:
+      wan:
+        ipv4_address: 198.18.10.21
+        ipv6_address: 2001:db8:10::21
+
+  controller:
+    image: ${RDLAB_CLIENT_IMAGE_CONTROLLER:-rdlab-client:1.5.0-sciter}
+    environment:
+      <<: *client-env
+      RD_ROLE: controller
+      RD_PEER_ID: ${RDLAB_PEER_ID:-}
+      RD_LOCAL_OPTS: ${RDLAB_CONTROLLER_LOCAL_OPTS:-}
+      RD_OPTS: ${RDLAB_CONTROLLER_OPTS:-}
+    extra_hosts: *stun-hosts
+    cap_add: [NET_ADMIN]   # only for the on-link IPv6 default route inside the container
+    <<: *limits
+    shm_size: 256m
+    networks:
+      wan:
+        ipv4_address: 198.18.10.22
+        ipv6_address: 2001:db8:10::22

@@ -1,0 +1,76 @@
+# "lan" topology overlay: sudo docker compose -p rdlab -f lab/compose.yaml -f lab/compose.lan.yaml ...
+# Both clients sit in ONE LAN behind ONE router (IPv4 MASQUERADE, IPv6 routed with a
+# stateful firewall, see docker/router.sh). hbbs sees both peers with the same public
+# IPv4 (198.18.10.31), so it takes its same-intranet path (FetchLocalAddr). Client to
+# client traffic stays inside the LAN and never crosses the router.
+
+networks:
+  lan:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 192.168.20.0/24
+        - subnet: 2001:db8:20::/64
+
+x-routes: &routes
+  image: ${RDLAB_ROUTER_IMAGE:-rdlab-router:latest}
+  command: ["routes"]
+  cap_add: [NET_ADMIN]
+  restart: "no"
+  cpus: 1
+  environment:
+    ROUTES6: "2001:db8:20::/64 via 2001:db8:10::31"
+
+services:
+  router1:
+    image: ${RDLAB_ROUTER_IMAGE:-rdlab-router:latest}
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.netfilter.nf_conntrack_tcp_be_liberal: "${RDLAB_CT_LIBERAL:-0}"
+    cpus: 1
+    mem_limit: 256m
+    environment:
+      WAN_NET4: "198.18.10."
+      LAN_V4: 192.168.20.0/24
+      LAN_V6: 2001:db8:20::/64
+      ROUTES6: ""
+      V6_FIREWALL: ${RDLAB_V6_FIREWALL:-1}
+      WAN_INPUT: ${RDLAB_WAN_INPUT:-drop}
+    networks:
+      wan:
+        ipv4_address: 198.18.10.31
+        ipv6_address: 2001:db8:10::31
+      lan:
+        ipv4_address: 192.168.20.254
+        ipv6_address: 2001:db8:20::254
+
+  hbbs-routes:
+    <<: *routes
+    network_mode: "service:hbbs"
+  hbbr-routes:
+    <<: *routes
+    network_mode: "service:hbbr"
+  stun-routes:
+    <<: *routes
+    network_mode: "service:stun"
+
+  controlled:
+    environment:
+      RD_GW4: 192.168.20.254
+      RD_GW6: 2001:db8:20::254
+    networks: !override
+      lan:
+        ipv4_address: 192.168.20.10
+        ipv6_address: 2001:db8:20::10
+
+  controller:
+    environment:
+      RD_GW4: 192.168.20.254
+      RD_GW6: 2001:db8:20::254
+    networks: !override
+      lan:
+        ipv4_address: 192.168.20.11
+        ipv6_address: 2001:db8:20::11
