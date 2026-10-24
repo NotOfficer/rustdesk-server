@@ -132,3 +132,14 @@ The reviewer could not deliver its report (the environment refused the report fi
 |---|---|---|---|
 | FINAL-7-1 | A WebRTC route keeps the controller's sink, and every reply for that controller address (forgeable `PunchHoleSent`/`RelayResponse`, anyone can send them) was sent to it; waiting for the sink had no time limit. With a controller that stops reading, forged replies pile up as spawned tasks (memory) and as blocked connections (file descriptors). Reproduced: a kept sink delivered 6 responses for 6 replies. | Valid (minor) | `cb39d26`: a kept sink serves one response, then only the route's ICE candidates; the 3 s timeout covers waiting for the sink. Test `a_kept_connection_serves_one_response` (failed before the fix). |
 | — | The reviewer's third probe (UDP bytes sent to a never-answering peer per TCP request) shows about 1:1 bytes, no amplification. | Not a finding | — |
+
+### Round 8 (`873230e..7ec6255`), last round
+
+No critical or major findings; two minor ones, both proven by the reviewer. The safety cap of 8 rounds is reached, so the fixes for them were not reviewed independently again (they have regression tests and passed all three test levels).
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-8-1 | Anyone can flip a peer's legacy mark with a forged reply: `note_peer_version` ran for replies over WebSocket (address from `X-Real-IP`) and for replies to no pending request, and `same_host` trusts a whole IPv4 address or /64. Effect: UDP and IPv6 to a 1.5.0 peer switched off (downgrade to the original behavior), or on for a 1.4.x peer. | Valid (minor) | `b02ce34`: learned only from replies to a waiting controller, over plain TCP or a claimed UDP route, never over WebSocket. Test `forged_replies_do_not_mark_a_peer_legacy`. Remaining: a sender on the peer's own public IP/64 who knows a waiting controller's address could still set it (downgrade only). |
+| FINAL-8-2 | Candidates over the per-route budget (128 frames = 64 distinct candidates, sent twice) counted as misses; a host with more than ~72 candidates got the controller's signalling connection closed. | Valid (minor) | `b02ce34`: over-budget candidates are dropped quietly; only unmatched ones count as misses. Docs corrected. Test `over_budget_candidates_keep_the_connection`. |
+
+**Loop result:** 8 rounds. Valid findings per round: 4, 4, 2, 3, 3, 1, 1 (reconstructed), 2, all minor; no round was free of findings, so the loop ended at the cap, as specified.
