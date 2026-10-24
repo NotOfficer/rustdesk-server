@@ -139,6 +139,12 @@ A <-udp-> B          "RDP?"/"RDP!" probes, then KCP
   connection**, with the observed source address of that UDP datagram.
 * A uses UDP only if it sent `udp_port > 0` and gets `is_udp = true`
   (client.rs:1021).
+* hbbs forwards `udp_port` only from controllers 1.5.0 or newer. 1.4.x
+  controllers send it too, but their UDP attempt (`punch_udp`, 20 s limit,
+  no outer timeout) holds up the relay fallback when UDP fails, and 1.4.1 has
+  no parallel TCP round that could win meanwhile; the controlled side does no
+  TCP punch once it gets a `udp_port`. With the original server, which
+  dropped `udp_port`, those clients always got a TCP punch.
 
 ### 1.5 IPv6 P2P
 
@@ -257,7 +263,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 | (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 500 ms or more (`SECURE_TCP`) |
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
-| `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; v6 only from 1.5.0 controllers |
+| `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; `udp_port` and v6 only from 1.5.0 controllers |
 | `PunchHoleSent` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` if it belongs to A's WebRTC route |
 | `PunchHoleSent` | UDP | if it matches an open UDP route: `PunchHoleResponse { socket_addr = observed UDP source, is_udp }` to A over TCP (`is_udp` only if it came from B's registered host); otherwise ignored |
 | `LocalAddr` | TCP | forward `socket_addr_v6` |
@@ -304,7 +310,10 @@ send more, or anything to a third address.
     proven retries come too late. UDP punching then falls back to TCP or
     relay, which is what the original server always did.
   * No reply goes to port 0, or to unspecified, multicast or broadcast
-    addresses. A send error is logged, never treated as a socket failure.
+    addresses. The reply is written straight to the socket: the framed UDP
+    socket keeps a frame that failed to send and retries it before every
+    later one, so a refused (spoofed) destination would otherwise block all
+    other UDP sends. A send error is logged and the reply dropped.
 * **UDP `PunchHoleSent`** never causes a UDP packet. It is accepted only if
   * an open punch route exists for the decoded `socket_addr` (A's address),
     created by a verified TCP `PunchHoleRequest` that asked for UDP;
@@ -389,7 +398,7 @@ be abused to make a peer send packets to a third host:
 | Client | Effect |
 |---|---|
 | 1.5.0 | all four features work when the controller enables them |
-| 1.4.9 | no WebRTC, no v1 exchange, no IPv6 as controller (see 1.5); as controlled side IPv6 works. UDP: 1.4.9 takes `udp_port` from hbbs' UDP answer or from a STUN probe on a different socket, whichever comes first, so it already sent `udp_port > 0` to the original hbbs, which dropped it. Now it is forwarded. If the port came from STUN, the controlled side punches the wrong port and UDP fails (1.5.0 removed that race for this reason). Either way a 1.4.9 controller with UDP explicitly on keeps its parallel TCP fallback round, which is unchanged and wins if UDP fails. |
+| 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: UDP and IPv6 work with a 1.5.0 controller; WebRTC offers are ignored by it, the controller falls back. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
 | all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |

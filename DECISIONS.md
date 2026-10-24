@@ -117,7 +117,10 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   RTO), so 500 ms. Costs key-exchanging clients (WebRTC rounds, signed-in
   clients, the controlled side's answer and ICE connections) 500 ms per
   connection.
-- **IPv6 only from 1.5.0 controllers** (review finding IPV6-3). 1.4.x
+- **UDP and IPv6 only from 1.5.0 controllers** (review findings IPV6-3 and
+  FINAL-3-1; 1.4.1 has no parallel TCP round, 1.4.2-1.4.9 race one but their
+  UDP attempt can still wait 20 s, so all of 1.4.x keeps the original
+  behavior as controller). 1.4.x
   controllers send `socket_addr_v6`, but their IPv6 attempt can hold up the
   relay fallback for up to 20 s, a regression against the original server.
   1.4.x controllers therefore keep the old behavior; 1.4.x controlled peers
@@ -191,3 +194,7 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **Client 1.4.0 in the lab** (FINAL-2-4): official 1.4.0 package. Its log
   names no connection type, so the lab takes "Relay" from hbbr's
   `got paired` and "TCP" otherwise (the only direct type of 1.4.0).
+- **UDP replies bypass the framed socket's queue** (FINAL-3-2). Observed,
+  not changed: the existing `Data::Msg` sends to peers (`PunchHole`, ...)
+  still use the framed socket, as upstream does, so a peer address the kernel
+  refuses blocks later sends until the socket is recreated. Pre-existing.

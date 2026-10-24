@@ -486,3 +486,21 @@ async fn nat_test_retry_after_the_connect_is_answered() {
     udp.send_to(&req, server).await.unwrap();
     assert_eq!(drain(&udp, 500).await.len(), 1);
 }
+
+// 1.4.x controllers send udp_port too, but their UDP attempt can hold up the
+// relay fallback for 20 s and 1.4.1 has no TCP round besides; they keep the
+// original behavior.
+#[tokio::test]
+async fn udp_only_from_controllers_since_1_5_0() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    for (version, forwarded) in [("1.4.0", false), ("1.4.1", false), ("1.4.9", false), ("1.5.0", true), ("1.6.0", true)] {
+        let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+        let mut req = punch_hole_request("peer01", &hbbs.key);
+        req.udp_port = 40000;
+        req.version = version.to_owned();
+        ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert_eq!(ph.udp_port == 40000, forwarded, "version {}", version);
+    }
+}

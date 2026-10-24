@@ -542,7 +542,7 @@ impl RendezvousServer {
                             port: addr.port() as _,
                             ..Default::default()
                         });
-                        allow_err!(socket.send(&msg_out, addr).await);
+                        try_send_udp(socket, &msg_out, addr);
                     }
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
@@ -927,11 +927,12 @@ impl RendezvousServer {
             let p2p = !ws && !relay_forced;
             // UDP and IPv6 would also bypass a relay the controller asked for itself;
             // WebRTC then stays relayed by its own ICE policy
-            let direct = p2p && !ph.force_relay;
+            // 1.4.x controllers wait up to 20 s for a failing UDP or IPv6 attempt
+            // before they relay (punch_udp), and 1.4.1 has no TCP round besides,
+            // so UDP and IPv6 start with 1.5.0; older ones get the old behavior
+            let direct = p2p && !ph.force_relay && punch::version_at_least(&ph.version, (1, 5, 0));
             let mut socket_addr_v6 = Bytes::new();
-            // 1.4.x controllers wait up to 20 s for a failing IPv6 attempt before
-            // they relay (punch_udp), so IPv6 starts with 1.5.0
-            if direct && punch::version_at_least(&ph.version, (1, 5, 0)) {
+            if direct {
                 socket_addr_v6 = forward_v6(&ph.socket_addr_v6);
                 if !socket_addr_v6.is_empty() && !self.ipv6_forward.allow(addr.ip(), false) {
                     log::debug!("Too many IPv6 punch requests from {:?}", addr);
@@ -1675,6 +1676,17 @@ impl RendezvousServer {
     }
 }
 
+// Sends a datagram straight on the socket. UdpFramed keeps a frame that failed
+// to send and retries it before every later one, so a reply to an address the
+// kernel refuses (spoofed source) would block all other UDP sends.
+fn try_send_udp(socket: &FramedSocket, msg: &RendezvousMessage, addr: SocketAddr) {
+    if let (FramedSocket::Direct(framed), Ok(bytes)) = (socket, msg.write_to_bytes()) {
+        if let Err(err) = framed.get_ref().try_send_to(&bytes, addr) {
+            log::debug!("UDP reply to {:?} failed: {}", addr, err);
+        }
+    }
+}
+
 // The controlled side sends its plaintext reply at once and closes without
 // reading. The offer must not reach it before a lost first segment of that
 // reply is retransmitted (RTO: at least 200 ms, about three round trips after
@@ -1859,6 +1871,30 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+
+    #[hbb_common::tokio::test]
+    async fn a_failed_udp_reply_does_not_block_the_socket() {
+        let msg = || {
+            let mut m = RendezvousMessage::new();
+            m.set_test_nat_response(TestNatResponse::default());
+            m
+        };
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let good = receiver.local_addr().unwrap();
+        // without SO_BROADCAST the kernel refuses this destination
+        let refused: SocketAddr = "255.255.255.255:9".parse().unwrap();
+        let mut socket = FramedSocket::new("0.0.0.0:0").await.unwrap();
+        try_send_udp(&socket, &msg(), refused);
+        socket.send(&msg(), good).await.unwrap();
+        let mut buf = [0u8; 64];
+        assert!(receiver.recv_from(&mut buf).is_ok());
+        // the framed send keeps the refused frame and fails on later sends too
+        assert!(socket.send(&msg(), refused).await.is_err());
+        assert!(socket.send(&msg(), good).await.is_err());
     }
 
     #[test]

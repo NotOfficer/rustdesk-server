@@ -287,3 +287,20 @@ async fn new_fields_with_switches_off_match_the_original() {
         compare(&baseline, &ALL_OFF, version, new_fields).await;
     }
 }
+
+// 1.4.x controllers send udp_port and socket_addr_v6 when UDP/IPv6 is on; with
+// the default switches they still get exactly what the original server did.
+#[tokio::test]
+async fn new_fields_from_1_4_controllers_match_the_original() {
+    let Some(baseline) = baseline_bin() else {
+        eprintln!("HBBS_BASELINE_BIN not set, skipped");
+        return;
+    };
+    fn udp_and_v6(r: &mut PunchHoleRequest) {
+        r.udp_port = 40000;
+        r.socket_addr_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());
+    }
+    for version in ["1.4.0", "1.4.1", "1.4.9"] {
+        compare(&baseline, &[], version, udp_and_v6).await;
+    }
+}
