@@ -105,3 +105,13 @@ No critical or major findings.
 | FINAL-4-1 | Flaky test: a UDP NAT test sent right after the TCP connect can be handled before the server registers the connection as proven (2 of 4 runs failed for the reviewer). Real clients retry every 20-200 ms. | Valid (test) | `e58b5cf`: the host is counted on accept instead of in the spawned task; the tests retry or wait like the client. |
 | FINAL-4-2 | The security design says forwarded IPv6 targets get probes only for 3 s because only 1.5.0 controllers are served; but the probes come from the controlled peer (20 s for 1.4.x) and the version is self-reported. | Valid (docs) | `e58b5cf`: §3.1a corrected (3 s or 20 s, the real bounds, the version check is a compatibility measure). |
 | FINAL-4-3 | The comparison tests with the original hbbs pass silently ("skipped") in a plain `cargo test` without `HBBS_BASELINE_BIN`. | Valid (test gap) | `e58b5cf`, `7356f3f`: `#[ignore]` with a reason in a plain run, they fail when run without the binary; `run-all-tests.sh` runs them with `--ignored` and checks their output. |
+
+### Round 5 (`873230e..f2113fc`)
+
+No critical or major findings. The reviewer also fuzzed UDP and TCP (plaintext, v0, v1) against the debug build: no crash or panic.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-5-1 | The IPv6 forward limit counts only per controller: several licensed controller IPs (or /64s) can all name the same victim address, and every forward makes a peer probe it (19 probes over 3 s for 1.5.0, up to 100 over 20 s for 1.4.x). Proven: 3 sources × 60 = 180 forwards in 0.09 s. | Valid (minor) | `e1d620e`: a second limiter per target /64 (burst 60, 1/s), refusing unknown targets when full. Test `v6_forwards_are_limited_per_target`. |
+| FINAL-5-2 | The NAT-test budget is charged per datagram; a client's test costs 5-7 answers, so a few controllers behind one public IP (office, CGNAT) run out after ~3 attempts and silently lose UDP punching. Proven: answers per attempt [7, 7, 7, 5, 2]. | Valid (minor) | `e1d620e`: per-IP budget raised to burst 60, 30/s (still one small answer per request, global cap unchanged). |
+| FINAL-5-3 | Proven sources are still inserted into a full NAT-test limiter table, so it can grow past 65,536 (bounded only by open TCP connections); the doc's "fail closed" and table size were inaccurate. | Valid (minor) | `e1d620e`: no insertion past the cap; a proven source is then held to the global budget. Unit test in `source_table_is_bounded`; docs corrected. |
