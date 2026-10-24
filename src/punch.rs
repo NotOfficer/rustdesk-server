@@ -33,11 +33,14 @@ const ROUTE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // with a plain punch, so the controller can still fall back to a relay.
 const MAX_UNANSWERED_OFFERS: u8 = 2;
 // UDP TestNatRequest answers per source IP (IPv6: per /64) and in total
-const TEST_NAT_BURST: f64 = 20.0;
-const TEST_NAT_RATE: f64 = 10.0;
+// (a client's NAT test sends 2 requests and retries until answered, 5-7 in all
+// at 100-300 ms round trip, and several clients can share one public IP)
+const TEST_NAT_BURST: f64 = 60.0;
+const TEST_NAT_RATE: f64 = 30.0;
 // in total per second by default (UDP_TEST_NAT_LIMIT); the burst is twice that
 pub(crate) const TEST_NAT_GLOBAL_RATE: u32 = 2000;
-// IPv6 addresses a controller IP (IPv6: /64) may hand to peers
+// IPv6 addresses a controller IP (IPv6: /64) may hand to peers, and how often
+// one target /64 may be handed out, whoever asks
 const IPV6_FORWARD_BURST: f64 = 60.0;
 const IPV6_FORWARD_RATE: f64 = 1.0;
 const LIMITER_SOURCES: usize = 65_536;
@@ -451,6 +454,13 @@ impl RateLimiter {
         Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None, true)
     }
 
+    /// The same IPv6 target from many controllers: caps the probes one address
+    /// can be made to receive. Targets are chosen freely, so a full table
+    /// refuses unknown ones.
+    pub(crate) fn ipv6_target() -> Self {
+        Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None, false)
+    }
+
     /// `proven`: the source is known not to be spoofed, so the global budget,
     /// which spoofed sources could use up, does not apply to it.
     pub(crate) fn allow(&self, ip: IpAddr, proven: bool) -> bool {
@@ -484,8 +494,14 @@ impl RateLimiter {
                     *last_sweep = Some(now);
                     sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
                 }
-                // proven sources are bounded by the open TCP connections
-                if sources.len() >= LIMITER_SOURCES && !proven {
+                if sources.len() >= LIMITER_SOURCES {
+                    // no bucket of its own while the table is full; a proven
+                    // source is still held to the global budget then
+                    if proven {
+                        if let Some((burst, rate)) = self.global {
+                            return global.take(now, rate, burst);
+                        }
+                    }
                     return self.allow_when_full;
                 }
             }
@@ -888,9 +904,16 @@ mod tests {
         let t1 = t0 + Duration::from_secs(1);
         assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap(), false));
         assert_eq!(limiter.inner.lock().unwrap().last_sweep, Some(t0));
-        // a proven source is not refused by a full table
-        assert!(limiter.allow_at(t1, "1.1.1.3".parse().unwrap(), true));
         assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap(), false));
+        // with a global budget, a proven source passes a full table on that
+        // budget, without an entry of its own
+        let limiter = RateLimiter::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((1e9, 1e9)), false);
+        for i in 0..LIMITER_SOURCES as u32 {
+            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), false);
+        }
+        assert!(!limiter.allow_at(t0, "1.1.1.3".parse().unwrap(), false));
+        assert!(limiter.allow_at(t0, "1.1.1.3".parse().unwrap(), true));
+        assert_eq!(len(&limiter), LIMITER_SOURCES);
         // the IPv6 forward limiter lets unknown sources through instead
         let limiter = RateLimiter::new(1.0, 0.001, None, true);
         for i in 0..LIMITER_SOURCES as u32 {

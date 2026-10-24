@@ -198,3 +198,11 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   not changed: the existing `Data::Msg` sends to peers (`PunchHole`, ...)
   still use the framed socket, as upstream does, so a peer address the kernel
   refuses blocks later sends until the socket is recreated. Pre-existing.
+- **NAT-test budget 60/30 per IP, IPv6 limit also per target** (FINAL-5-1,
+  FINAL-5-2, FINAL-5-3): a client's NAT test costs 5-7 answers, so 20/10 was
+  tight for shared public IPs; the answer stays a single small datagram per
+  request. A forwarded IPv6 address is also limited per target /64, so many
+  controllers cannot point peers at one victim; a full target table refuses
+  unknown targets (an attacker with many /64s can switch IPv6 P2P off for
+  new requests; fallback as with the original server). The NAT-test limiter
+  table never grows past its cap.

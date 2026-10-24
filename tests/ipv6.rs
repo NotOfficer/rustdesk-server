@@ -273,3 +273,21 @@ async fn v6_forwards_are_limited_per_controller() {
     }
     assert!((60..=62).contains(&forwarded), "{} forwarded", forwarded);
 }
+
+// Many controllers naming the same target: the peers would all probe it.
+#[tokio::test]
+async fn v6_forwards_are_limited_per_target() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut forwarded = 0;
+    for i in 0..70u8 {
+        // a different controller IP each time
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 20, 0, i + 1));
+        let mut ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
+        request(&hbbs, &mut ctl, "peer01", v6("[2001:db8::99]:40001")).await;
+        if !peer.expect(3000, pick_punch_hole).await.unwrap().socket_addr_v6.is_empty() {
+            forwarded += 1;
+        }
+    }
+    assert!((60..=62).contains(&forwarded), "{} forwarded", forwarded);
+}

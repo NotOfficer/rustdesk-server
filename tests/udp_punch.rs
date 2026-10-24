@@ -72,7 +72,7 @@ async fn udp_test_nat_is_rate_limited() {
         sock.send_to(&req, hbbs.udp_addr()).await.unwrap();
     }
     let answers = drain(&sock, 1000).await.len();
-    assert!((20..=25).contains(&answers), "{} answers", answers);
+    assert!((60..=66).contains(&answers), "{} answers", answers);
     // another source has its own budget
     let other = udp_socket("127.0.0.3".parse().unwrap()).await;
     other.send_to(&req, hbbs.udp_addr()).await.unwrap();

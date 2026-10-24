@@ -129,6 +129,7 @@ pub struct RendezvousServer {
     routes: Arc<PunchRoutes>,
     test_nat: Arc<RateLimiter>,
     ipv6_forward: Arc<RateLimiter>,
+    ipv6_target: Arc<RateLimiter>,
     tcp_hosts: Arc<TcpHosts>,
     pm: PeerMap,
     tx: Sender,
@@ -194,6 +195,7 @@ impl RendezvousServer {
                     .unwrap_or(punch::TEST_NAT_GLOBAL_RATE),
             )),
             ipv6_forward: Arc::new(RateLimiter::ipv6_forward()),
+            ipv6_target: Arc::new(RateLimiter::ipv6_target()),
             tcp_hosts: Default::default(),
             pm,
             tx: tx.clone(),
@@ -934,9 +936,16 @@ impl RendezvousServer {
             let mut socket_addr_v6 = Bytes::new();
             if direct {
                 socket_addr_v6 = forward_v6(&ph.socket_addr_v6);
-                if !socket_addr_v6.is_empty() && !self.ipv6_forward.allow(addr.ip(), false) {
-                    log::debug!("Too many IPv6 punch requests from {:?}", addr);
-                    socket_addr_v6 = Bytes::new();
+                // the peer punches whatever address it gets: limit per controller
+                // and per target
+                let target = punch::decode_addr(&socket_addr_v6).map(|a| a.ip());
+                if let Some(target) = target {
+                    if !self.ipv6_forward.allow(addr.ip(), false)
+                        || !self.ipv6_target.allow(target, false)
+                    {
+                        log::debug!("Too many IPv6 punch requests from {:?}", addr);
+                        socket_addr_v6 = Bytes::new();
+                    }
                 }
             }
             let mut session_key = None;

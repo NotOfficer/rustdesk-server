@@ -163,8 +163,9 @@ A <-udp-> B          "RDP?"/"RDP!" probes, then KCP
   * the address is global unicast (2000::/3) with a port, which is all a
     genuine client reports;
   * the controller's IP has not handed out more than 60 addresses in a burst
-    (1 per second after that), because the peer sends punch probes to
-    whatever address it gets.
+    (1 per second after that), and the same target /64 has not been handed
+    out more than that by all controllers together, because the peer sends
+    punch probes to whatever address it gets.
 * B opens a v6 UDP listener and reports it in `PunchHoleSent.socket_addr_v6`,
   `LocalAddr.socket_addr_v6` or `RelayResponse.socket_addr_v6`.
 * hbbs copies that into `PunchHoleResponse.socket_addr_v6` or
@@ -294,9 +295,13 @@ send more, or anything to a third address.
     `TestNatResponse { port }` only, never a `ConfigUpdate`: at most 7 bytes of
     payload for the client's 3-byte request. On the wire (with IP/UDP headers)
     that is at most ~1.15x, one packet per packet.
-  * It is rate-limited per source IP (IPv6: per /64) with a token bucket, and
-    globally (`UDP_TEST_NAT_LIMIT`, default 2000 answers per second). When
-    the limiter table is full, requests are dropped (fail closed).
+  * It is rate-limited per source IP (IPv6: per /64) with a token bucket
+    (burst 60, 30 per second: a client's test sends 5-7 requests, and
+    several clients can share one public IP), and globally
+    (`UDP_TEST_NAT_LIMIT`, default 2000 answers per second). The limiter
+    table holds at most 65,536 sources; when it is full, unknown sources are
+    dropped (fail closed), or held to the global budget if they are proven
+    (below).
   * Spoofed sources could use up the global budget and so switch off UDP
     punching for everyone. Sources with an open TCP connection to hbbs are
     therefore exempt from the global budget (not from their own): the TCP
@@ -344,8 +349,9 @@ be abused to make a peer send packets to a third host:
 * `socket_addr_v6`: chosen by the controller. The controlled peer sends its
   punch probes there: for up to 3 s (1.5.0, `punch_udp`) or 20 s (1.4.x,
   about 100 datagrams). hbbs forwards only global unicast addresses with a
-  port, and at most 60 per controller IP in a burst, then 1 per second; a
-  request also needs the licence key and an online peer id. The "1.5.0 or
+  port, at most 60 per controller IP and 60 per target /64 in a burst, then
+  1 per second each; a request also needs the licence key and an online
+  peer id. The "1.5.0 or
   newer" check is about compatibility, not security: the version is
   reported by the client itself.
 * ICE candidates: chosen by each side; the peer's ICE agent sends paced
@@ -365,8 +371,8 @@ be abused to make a peer send packets to a third host:
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
-| UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: 2000/s (`UDP_TEST_NAT_LIMIT`), burst twice that, not applied to sources with an open TCP connection; table 65,536 entries, a full table is swept at most every 2 s |
-| IPv6 forwards | per controller IP/64: burst 60, 1/s; table 65,536 entries; when it is full (tens of thousands of licensed /64s), unknown sources pass instead of everybody being refused |
+| UDP `TestNatRequest` limiter | per IP/64: burst 60, 30/s; global: 2000/s (`UDP_TEST_NAT_LIMIT`), burst twice that, not applied to sources with an open TCP connection; table at most 65,536 entries, a full table is swept at most every 2 s |
+| IPv6 forwards | per controller IP/64 and per target /64: burst 60, 1/s each; tables at most 65,536 entries; a full controller table lets unknown controllers pass (they are licensed and cannot be spoofed), a full target table refuses unknown targets |
 | TCP frames on 21116 | 64 KiB per frame |
 | Key exchange | per-connection only |
 
