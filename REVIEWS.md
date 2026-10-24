@@ -95,3 +95,13 @@ No critical or major findings.
 |---|---|---|---|
 | FINAL-3-1 | `udp_port` was forwarded from 1.4.1 controllers. 1.4.1 has a single round (no parallel TCP fallback, verified: `_start_inner` appears only from 1.4.2), its UDP attempt (`punch_udp`, 20 s) ignores the connect timeout, and the controlled side does no TCP punch once it has a `udp_port`: a working TCP punch could turn into a relay after ~20 s. | Valid (minor) | `c163c9e`: `udp_port` (like IPv6) only from controllers 1.5.0 or newer; all 1.4.x controllers get the original behavior. Tests `udp_only_from_controllers_since_1_5_0` and the differential test `new_fields_from_1_4_controllers_match_the_original`. |
 | FINAL-3-2 | A failed UDP `TestNatResponse` send stays queued in the framed socket (tokio-util `UdpFramed`) and makes every later UDP send fail until the socket is recreated; a spoofed source the kernel refuses could keep peer sends broken. Proven with a unit test. | Valid (minor) | `c163c9e`: the reply is written straight to the socket (`try_send_to`), outside the queue. Unit test `a_failed_udp_reply_does_not_block_the_socket` (with the framed send as control). The same pre-existing behavior of the unchanged `Data::Msg` path is noted in DECISIONS.md and REPORT.md. |
+
+### Round 4 (`873230e..06adbbc`)
+
+No critical or major findings.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-4-1 | Flaky test: a UDP NAT test sent right after the TCP connect can be handled before the server registers the connection as proven (2 of 4 runs failed for the reviewer). Real clients retry every 20-200 ms. | Valid (test) | `e58b5cf`: the host is counted on accept instead of in the spawned task; the tests retry or wait like the client. |
+| FINAL-4-2 | The security design says forwarded IPv6 targets get probes only for 3 s because only 1.5.0 controllers are served; but the probes come from the controlled peer (20 s for 1.4.x) and the version is self-reported. | Valid (docs) | `e58b5cf`: §3.1a corrected (3 s or 20 s, the real bounds, the version check is a compatibility measure). |
+| FINAL-4-3 | The comparison tests with the original hbbs pass silently ("skipped") in a plain `cargo test` without `HBBS_BASELINE_BIN`. | Valid (test gap) | `e58b5cf`: `#[ignore]` with a reason in a plain run, they fail when run without the binary; `run-all-tests.sh` runs them with `--ignored` and checks their output. |
