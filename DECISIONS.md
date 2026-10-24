@@ -143,3 +143,29 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   connections from many /64s, the same cost as exhausting the server's
   connections in general. A full table fails closed: no UDP/WebRTC for new
   requests, which fall back to TCP/relay.
+
+## Lab and tests
+
+- **Client package**: the sciter `.deb` is the default in the lab (one small
+  process, no GL under Xvfb); the Flutter package also passed the baseline
+  case. Both are official 1.5.0 release assets.
+- **No internet in the lab networks** (`internal: true`). A local coturn
+  answers STUN, and the default STUN host names from hbb_common
+  `src/webrtc.rs` are pointed at it with `extra_hosts`. No TURN server, so a
+  WebRTC win in the lab is always a direct connection.
+- **IPv6 in the lab** uses `2001:db8::/32` addresses (accepted by the client
+  as global, 2000::/3) in internal Docker networks; the client containers get
+  `NET_ADMIN` only to add a default route inside their own network
+  namespace, which the client's IPv6 detection needs.
+- **NAT topology** (bonus): with Linux's default strict TCP connection
+  tracking, the router containers drop the TCP punch, so TCP-only cases end
+  on the relay there; `--ct-liberal` lets them through. Real home routers
+  differ; the flat topology is the reference for "which transport is
+  negotiated".
+- **Differential test** `tests/compat.rs`: old-style requests are replayed
+  against the original hbbs binary and this one, and the observed replies
+  must match (defaults and all switches off).
+- **Observed, not changed: hbbr pairing race.** When both relay requests of
+  a session arrive at the same moment, `make_pair_` in `src/relay_server.rs`
+  can leave both unpaired and the clients retry. Pre-existing upstream
+  behavior, outside the scope ("hbbr only if really necessary").
