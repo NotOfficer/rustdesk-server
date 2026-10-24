@@ -331,7 +331,11 @@ send more, or anything to a third address.
     addresses. The reply is written straight to the socket: the framed UDP
     socket keeps a frame that failed to send and retries it before every
     later one, so a refused (spoofed) destination would otherwise block all
-    other UDP sends. A send error is logged and the reply dropped.
+    other UDP sends. A send error is logged and the reply dropped. Messages
+    forwarded to peers (`PunchHole`, `RequestRelay`, `IceCandidate`, ...) are
+    written the same way, so an oversized `RequestRelay` (TCP frames go up
+    to 64 KiB, a datagram only to 65,507 bytes) cannot block the socket
+    either.
 * **UDP `PunchHoleSent`** never causes a UDP packet. It is accepted only if
   * an open punch route exists for the decoded `socket_addr` (A's address),
     created by a verified TCP `PunchHoleRequest` that asked for UDP;

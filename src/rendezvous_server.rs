@@ -335,7 +335,7 @@ impl RendezvousServer {
                 }
                 Some(data) = rx.recv() => {
                     match data {
-                        Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
+                        Data::Msg(msg, addr) => { send_udp(socket, &msg, addr).await; }
                         Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
                         Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                     }
@@ -1800,6 +1800,23 @@ fn try_send_udp(socket: &FramedSocket, msg: &RendezvousMessage, addr: SocketAddr
     }
 }
 
+// Messages forwarded to a peer (PunchHole, RequestRelay, IceCandidate, ...) go
+// straight to the socket for the same reason: a RequestRelay arrives over TCP
+// in frames up to 64 KiB, too large for one datagram, and the framed socket
+// would retry it before every later send until the socket is rebuilt.
+async fn send_udp(socket: &mut FramedSocket, msg: &RendezvousMessage, addr: SocketAddr) {
+    match socket {
+        FramedSocket::Direct(framed) => {
+            if let Ok(bytes) = msg.write_to_bytes() {
+                if let Err(err) = framed.get_ref().send_to(&bytes, addr).await {
+                    log::debug!("UDP send to {:?} failed: {}", addr, err);
+                }
+            }
+        }
+        _ => allow_err!(socket.send(msg, addr).await),
+    }
+}
+
 // The controlled side sends its plaintext reply at once and closes without
 // reading. The offer must not reach it before a lost first segment of that
 // reply is retransmitted (RTO: at least 200 ms, about three round trips after
@@ -2008,6 +2025,31 @@ mod tests {
         // the framed send keeps the refused frame and fails on later sends too
         assert!(socket.send(&msg(), refused).await.is_err());
         assert!(socket.send(&msg(), good).await.is_err());
+    }
+
+    #[hbb_common::tokio::test]
+    async fn an_oversized_forward_does_not_block_the_socket() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let good = receiver.local_addr().unwrap();
+        let mut big = RendezvousMessage::new();
+        big.set_request_relay(RequestRelay {
+            token: "t".repeat(65_600),
+            ..Default::default()
+        });
+        let mut small = RendezvousMessage::new();
+        small.set_test_nat_response(TestNatResponse::default());
+        let mut socket = FramedSocket::new("127.0.0.1:0").await.unwrap();
+        send_udp(&mut socket, &big, good).await;
+        send_udp(&mut socket, &small, good).await;
+        socket.send(&small, good).await.unwrap();
+        let mut buf = [0u8; 64];
+        for _ in 0..2 {
+            let (n, _) = receiver.recv_from(&mut buf).unwrap();
+            assert!(n < 64);
+        }
     }
 
     #[test]

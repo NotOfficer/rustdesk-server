@@ -210,10 +210,14 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **Client 1.4.0 in the lab** (FINAL-2-4): official 1.4.0 package. Its log
   names no connection type, so the lab takes "Relay" from hbbr's
   `got paired` and "TCP" otherwise (the only direct type of 1.4.0).
-- **UDP replies bypass the framed socket's queue** (FINAL-3-2). Observed,
-  not changed: the existing `Data::Msg` sends to peers (`PunchHole`, ...)
-  still use the framed socket, as upstream does, so a peer address the kernel
-  refuses blocks later sends until the socket is recreated. Pre-existing.
+- **UDP replies bypass the framed socket's queue** (FINAL-3-2, extra
+  review OPUS-4). The framed socket keeps a frame that failed to send and
+  retries it before every later one, so one refused destination or oversized
+  datagram blocks all UDP sends until the socket is recreated. The NAT-test
+  answer and, since OPUS-4, every message forwarded to a peer (`Data::Msg`:
+  `PunchHole`, `RequestRelay`, `IceCandidate`, ...) are written straight to
+  the socket. The registration replies keep the framed socket, as upstream
+  does (pre-existing).
 - **NAT-test budget 60/30 per IP, IPv6 limit also per target** (FINAL-5-1,
   FINAL-5-2, FINAL-5-3): a client's NAT test costs 5-7 answers, so 20/10 was
   tight for shared public IPs; the answer stays a single small datagram per
