@@ -638,6 +638,7 @@ impl RendezvousServer {
                     if !self.answer_allowed(&rr.webrtc_sdp_answer, addr_b, rr.id()) {
                         rr.webrtc_sdp_answer.clear();
                     }
+                    self.note_peer_version(rr.id(), &rr.version, addr).await;
                     let id = rr.id();
                     if !id.is_empty() {
                         let pk = self.get_pk(&rr.version, id.to_owned()).await;
@@ -755,6 +756,7 @@ impl RendezvousServer {
             &addr_a,
             &addr
         );
+        self.note_peer_version(&phs.id, &phs.version, addr).await;
         let mut msg_out = RendezvousMessage::new();
         let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
             phs.webrtc_sdp_answer
@@ -794,6 +796,7 @@ impl RendezvousServer {
             log::debug!("Ignored UDP punch hole sent from {:?}", addr);
             return;
         };
+        self.note_peer_version(&phs.id, &phs.version, addr).await;
         // From another host than the peer registered from (NAT pools, multi-WAN,
         // or forged): still answer, so the answer and the relay fallback work, but
         // the controller must not punch that address.
@@ -840,6 +843,7 @@ impl RendezvousServer {
             &addr_a,
             &addr
         );
+        self.note_peer_version(&la.id, &la.version, addr).await;
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
             socket_addr: la.local_addr.clone(),
@@ -883,9 +887,9 @@ impl RendezvousServer {
         // because punch hole won't work if in the same intranet,
         // all routers will drop such self-connections.
         if let Some(peer) = self.pm.get(&id).await {
-            let (elapsed, peer_addr) = {
+            let (elapsed, peer_addr, peer_legacy) = {
                 let r = peer.read().await;
-                (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
+                (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr, r.legacy_punch)
             };
             if elapsed >= REG_TIMEOUT {
                 let mut msg_out = RendezvousMessage::new();
@@ -931,8 +935,14 @@ impl RendezvousServer {
             // WebRTC then stays relayed by its own ICE policy
             // 1.4.x controllers wait up to 20 s for a failing UDP or IPv6 attempt
             // before they relay (punch_udp), and 1.4.1 has no TCP round besides,
-            // so UDP and IPv6 start with 1.5.0; older ones get the old behavior
-            let direct = p2p && !ph.force_relay && punch::version_at_least(&ph.version, (1, 5, 0));
+            // so UDP and IPv6 start with 1.5.0; older ones get the old behavior.
+            // A 1.4.x controlled side would punch UDP instead of TCP with a
+            // protocol 1.5.0 does not answer, so it gets the old behavior too
+            // once it has replied with its version.
+            let direct = p2p
+                && !ph.force_relay
+                && punch::version_at_least(&ph.version, (1, 5, 0))
+                && !peer_legacy;
             let mut socket_addr_v6 = Bytes::new();
             if direct {
                 socket_addr_v6 = forward_v6(&ph.socket_addr_v6);
@@ -1119,6 +1129,20 @@ impl RendezvousServer {
         let sink = self.take_tcp_sink(addr).await;
         Self::send_to_shared_sink(sink, msg).await;
         Ok(())
+    }
+
+    // Remembers whether the controlled peer `id` runs a client older than 1.5.0,
+    // from a reply it sent from the host it registered from.
+    async fn note_peer_version(&self, id: &str, version: &str, sender: SocketAddr) {
+        if id.is_empty() || version.is_empty() {
+            return;
+        }
+        if let Some(peer) = self.pm.get_in_memory(id).await {
+            let mut peer = peer.write().await;
+            if punch::same_host(peer.socket_addr.ip(), sender.ip()) {
+                peer.legacy_punch = !punch::version_at_least(version, (1, 5, 0));
+            }
+        }
     }
 
     // A WebRTC answer is passed on only for the controller's own route.

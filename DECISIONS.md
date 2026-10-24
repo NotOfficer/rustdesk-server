@@ -206,3 +206,10 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   unknown targets (an attacker with many /64s can switch IPv6 P2P off for
   new requests; fallback as with the original server). The NAT-test limiter
   table never grows past its cap.
+- **Legacy controlled peers are remembered** (FINAL-6-1). A 1.4.x
+  controlled side that gets a `udp_port` punches UDP only (no TCP punch),
+  with probes 1.5.0 does not answer. The registration carries no version, so
+  hbbs learns it from the peer's replies (from its registered host, kept in
+  memory only, the database is unchanged) and then withholds `udp_port` and
+  IPv6 from it. The first connection to such a peer after a server start
+  can still take the UDP detour (the controller's TCP round usually wins).

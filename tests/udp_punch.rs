@@ -515,3 +515,52 @@ async fn udp_only_from_controllers_since_1_5_0() {
         assert_eq!(ph.udp_port == 40000, forwarded, "version {}", version);
     }
 }
+
+// A 1.4.x controlled side punches UDP instead of TCP when it gets a udp_port,
+// with probes 1.5.0 does not answer. Once it has replied with its version it
+// gets the old behavior; a reply from another host does not count.
+#[tokio::test]
+async fn legacy_controlled_side_gets_no_udp_port_after_its_reply() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    async fn request_udp(hbbs: &Hbbs, peer: &Peer) -> (Tcp, PunchHole) {
+        let mut ctl = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
+        let mut req = punch_hole_request("peer01", &hbbs.key);
+        req.udp_port = 40000;
+        req.socket_addr_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());
+        ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+        (ctl, peer.expect(3000, pick_punch_hole).await.unwrap())
+    }
+    async fn tcp_reply(hbbs: &Hbbs, ip: std::net::IpAddr, ph: &PunchHole, version: &str) {
+        let mut reply = Tcp::connect(hbbs, ip, Kx::None).await;
+        reply
+            .send(&msg(|m| {
+                m.set_punch_hole_sent(PunchHoleSent {
+                    socket_addr: ph.socket_addr.clone(),
+                    id: "peer01".to_owned(),
+                    version: version.to_owned(),
+                    ..Default::default()
+                })
+            }))
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (mut ctl, ph) = request_udp(&hbbs, &peer).await;
+    assert_eq!(ph.udp_port, 40000);
+    let punch = udp_socket(PEER_IP).await;
+    send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", Some(|p| p.version = "1.4.9".to_owned())).await;
+    assert!(ctl.expect(3000, pick_punch_hole_response).await.unwrap().is_udp);
+    // from now on: no udp_port, no IPv6
+    let (_ctl, ph) = request_udp(&hbbs, &peer).await;
+    assert_eq!(ph.udp_port, 0);
+    assert!(ph.socket_addr_v6.is_empty());
+    // a reply claiming 1.5.0 from another host does not count
+    tcp_reply(&hbbs, "127.0.0.3".parse().unwrap(), &ph, "1.5.0").await;
+    let (_ctl, ph) = request_udp(&hbbs, &peer).await;
+    assert_eq!(ph.udp_port, 0);
+    // the peer updated to 1.5.0
+    tcp_reply(&hbbs, PEER_IP, &ph, "1.5.0").await;
+    let (_ctl, ph) = request_udp(&hbbs, &peer).await;
+    assert_eq!(ph.udp_port, 40000);
+    assert!(!ph.socket_addr_v6.is_empty());
+}
