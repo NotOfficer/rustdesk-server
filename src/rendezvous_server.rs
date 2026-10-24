@@ -53,10 +53,9 @@ const REG_TIMEOUT: i64 = 30_000;
 // largest rendezvous frame accepted on TCP; a PunchHoleRequest with an offer is a few KiB
 const MAX_TCP_FRAME: usize = 64 * 1024;
 // How long a new TCP connection may speak first before the key exchange is
-// offered: longer than a TCP retransmission of a lost first segment (200 ms
-// minimum RTO plus the round trip), so the controlled side's reply is not cut
-// off by a reset. Clients that want the exchange wait for it.
-const KX_OFFER_DELAY: u64 = 500;
+// offered, see kx_offer_delay.
+const KX_OFFER_DELAY_MIN: u64 = 500;
+const KX_OFFER_DELAY_MAX: u64 = 3_000;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
@@ -1517,6 +1516,7 @@ impl RendezvousServer {
                 }
             }
         } else {
+            let offer_delay = kx_offer_delay(tcp_rtt(&stream));
             let mut codec = BytesCodec::new();
             codec.set_max_packet_length(MAX_TCP_FRAME);
             let (a, mut b) = Framed::new(stream, codec).split();
@@ -1528,7 +1528,7 @@ impl RendezvousServer {
                     // Clients that want the exchange wait for our offer. The others speak
                     // first and often close right after; an unread offer would turn that
                     // close into a reset, which can lose their message.
-                    match timeout(KX_OFFER_DELAY, b.next()).await {
+                    match timeout(offer_delay, b.next()).await {
                         Ok(Some(Ok(bytes))) => first = Some(bytes),
                         Ok(_) => return Ok(()),
                         Err(_) => match key_exchange::offer(sk) {
@@ -1673,6 +1673,44 @@ impl RendezvousServer {
         }
         false
     }
+}
+
+// The controlled side sends its plaintext reply at once and closes without
+// reading. The offer must not reach it before a lost first segment of that
+// reply is retransmitted (RTO: at least 200 ms, about three round trips after
+// the handshake), or the close turns into a reset that discards the reply.
+// Clients that want the exchange wait up to 18 s for it.
+fn kx_offer_delay(rtt: Option<Duration>) -> u64 {
+    let rtt = rtt.map(|d| d.as_millis() as u64).unwrap_or(0);
+    rtt.saturating_mul(4)
+        .saturating_add(100)
+        .clamp(KX_OFFER_DELAY_MIN, KX_OFFER_DELAY_MAX)
+}
+
+// The round trip the kernel measured during the TCP handshake.
+#[cfg(target_os = "linux")]
+fn tcp_rtt(stream: &TcpStream) -> Option<Duration> {
+    use hbb_common::libc;
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: tcp_info is plain data; getsockopt writes at most `len` bytes
+    // into it and reports the size it wrote.
+    let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            &mut info as *mut libc::tcp_info as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0 && info.tcpi_rtt > 0).then(|| Duration::from_micros(info.tcpi_rtt as u64))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tcp_rtt(_stream: &TcpStream) -> Option<Duration> {
+    None
 }
 
 // A mangled address from the network; like AddrMangle::decode, an invalid one
@@ -1821,6 +1859,28 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+
+    #[test]
+    fn kx_offer_delay_follows_the_round_trip() {
+        let ms = |n| Some(Duration::from_millis(n));
+        assert_eq!(kx_offer_delay(None), KX_OFFER_DELAY_MIN);
+        assert_eq!(kx_offer_delay(ms(50)), KX_OFFER_DELAY_MIN);
+        assert_eq!(kx_offer_delay(ms(200)), 900);
+        assert_eq!(kx_offer_delay(ms(600)), 2_500);
+        assert_eq!(kx_offer_delay(ms(5_000)), KX_OFFER_DELAY_MAX);
+        assert_eq!(kx_offer_delay(Some(Duration::MAX)), KX_OFFER_DELAY_MAX);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[hbb_common::tokio::test]
+    async fn tcp_rtt_reads_the_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let rtt = tcp_rtt(&server).unwrap();
+        assert!(rtt < Duration::from_millis(100));
     }
 
     #[hbb_common::tokio::test]

@@ -462,3 +462,27 @@ async fn connected_controllers_keep_their_nat_test() {
     assert_eq!(drain(&connected, 500).await.len(), 5);
     assert!(drain(&stranger, 100).await.is_empty());
 }
+
+// The client starts its UDP NAT test just before it connects over TCP
+// (client.rs test_udp_uat, then _start_inner). With the global budget used up,
+// the early request is refused and the retry after the connect is answered.
+#[tokio::test]
+async fn nat_test_retry_after_the_connect_is_answered() {
+    let hbbs = Hbbs::start(&[("UDP_TEST_NAT_LIMIT", "5")], &[]).await;
+    let req = test_nat_request();
+    let server = hbbs.udp_addr();
+    let sources: Vec<std::net::UdpSocket> = (0..30u8)
+        .filter_map(|i| std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 11, 0, i + 1), 0)).ok())
+        .collect();
+    for s in &sources {
+        s.send_to(&req, server).ok();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ip: std::net::IpAddr = "127.9.9.20".parse().unwrap();
+    let udp = udp_socket(ip).await;
+    udp.send_to(&req, server).await.unwrap();
+    assert!(drain(&udp, 100).await.is_empty());
+    let _ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
+    udp.send_to(&req, server).await.unwrap();
+    assert_eq!(drain(&udp, 500).await.len(), 1);
+}

@@ -111,13 +111,47 @@ impl RouteTable {
         }
     }
 
+    fn source_full(&self, ctl: &SocketAddr) -> bool {
+        self.per_source
+            .get(&source_key(ctl.ip()))
+            .map(|n| *n >= MAX_ROUTES_PER_IP)
+            .unwrap_or(false)
+    }
+
     fn full(&self, ctl: &SocketAddr) -> bool {
-        self.map.len() >= MAX_ROUTES
-            || self
-                .per_source
-                .get(&source_key(ctl.ip()))
-                .map(|n| *n >= MAX_ROUTES_PER_IP)
-                .unwrap_or(false)
+        self.map.len() >= MAX_ROUTES || self.source_full(ctl)
+    }
+
+    // Makes room in a full table for a route of `ctl`'s source: the source with
+    // the most routes gives up its oldest one, if it has clearly more than
+    // `ctl`'s source. So one heavy user cannot lock everybody else out.
+    fn evict_for(&mut self, ctl: &SocketAddr) -> bool {
+        let own = source_key(ctl.ip());
+        let own_n = self.per_source.get(&own).copied().unwrap_or(0);
+        let Some((heavy, n)) = self
+            .per_source
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map(|(k, n)| (*k, *n))
+        else {
+            return false;
+        };
+        if heavy == own || n <= own_n + 1 {
+            return false;
+        }
+        let oldest = self
+            .map
+            .iter()
+            .filter(|(k, _)| source_key(k.ip()) == heavy)
+            .min_by_key(|(_, r)| r.created)
+            .map(|(k, _)| *k);
+        match oldest {
+            Some(k) => {
+                self.remove(&k);
+                true
+            }
+            None => false,
+        }
     }
 
     // Drops expired routes, at most once per interval, so a full table does not
@@ -181,9 +215,9 @@ impl PunchRoutes {
             }
             if map.full(&ctl) {
                 map.sweep(now);
-                if map.full(&ctl) {
-                    return grant;
-                }
+            }
+            if map.source_full(&ctl) || (map.map.len() >= MAX_ROUTES && !map.evict_for(&ctl)) {
+                return grant;
             }
             map.insert(
                 ctl,
@@ -352,11 +386,15 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> bool {
+    fn has_token(&mut self, now: Instant, rate: f64, burst: f64) -> bool {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.tokens = (self.tokens + elapsed * rate).min(burst);
         self.last = now;
-        if self.tokens < 1.0 {
+        self.tokens >= 1.0
+    }
+
+    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> bool {
+        if !self.has_token(now, rate, burst) {
             return false;
         }
         self.tokens -= 1.0;
@@ -364,12 +402,13 @@ impl Bucket {
     }
 }
 
-/// Token buckets per source IP (IPv6: per /64), and optionally in total. When
-/// the source table is full, unknown sources are refused.
+/// Token buckets per source IP (IPv6: per /64), and optionally in total.
 pub(crate) struct RateLimiter {
     burst: f64,
     rate: f64,
     global: Option<(f64, f64)>,
+    // what an unknown source gets while the source table is full
+    allow_when_full: bool,
     inner: Mutex<LimiterState>,
 }
 
@@ -380,12 +419,13 @@ struct LimiterState {
 }
 
 impl RateLimiter {
-    fn new(burst: f64, rate: f64, global: Option<(f64, f64)>) -> Self {
+    fn new(burst: f64, rate: f64, global: Option<(f64, f64)>, allow_when_full: bool) -> Self {
         let global_burst = global.map(|g| g.0).unwrap_or_default();
         Self {
             burst,
             rate,
             global,
+            allow_when_full,
             inner: Mutex::new(LimiterState {
                 global: Bucket::full(Instant::now(), global_burst),
                 sources: HashMap::new(),
@@ -395,16 +435,20 @@ impl RateLimiter {
     }
 
     /// UDP TestNatRequest answers. Their source can be spoofed, so every answer
-    /// is a packet to a possible victim. `global_rate` caps all sources together.
+    /// is a packet to a possible victim. `global_rate` caps all sources together;
+    /// a full source table refuses unknown sources.
     pub(crate) fn test_nat(global_rate: u32) -> Self {
         let rate = global_rate.max(1) as f64;
-        Self::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((2.0 * rate, rate)))
+        Self::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((2.0 * rate, rate)), false)
     }
 
     /// IPv6 addresses forwarded from a controller: the peer sends punch probes
-    /// to whatever address the controller names.
+    /// to whatever address the controller names. Its sources come from
+    /// licensed TCP requests and cannot be spoofed; a full table, which takes
+    /// tens of thousands of /64s, lets unknown sources through rather than
+    /// refusing everybody else.
     pub(crate) fn ipv6_forward() -> Self {
-        Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None)
+        Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None, true)
     }
 
     /// `proven`: the source is known not to be spoofed, so the global budget,
@@ -421,19 +465,29 @@ impl RateLimiter {
             sources,
             last_sweep,
         } = &mut *guard;
-        if !sources.contains_key(&source) && sources.len() >= LIMITER_SOURCES {
-            // a bucket that has refilled is the same as none; sweep at most once
-            // per refill time, so a full table costs no scan per packet
-            let refill = Duration::from_secs_f64(self.burst / self.rate);
-            if last_sweep
-                .map(|t| now.saturating_duration_since(t) >= refill)
-                .unwrap_or(true)
-            {
-                *last_sweep = Some(now);
-                sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
+        if !sources.contains_key(&source) {
+            // A new unproven source only gets a bucket while the global budget has
+            // something left, so spoofed sources cannot fill the table.
+            if let (false, Some((burst, rate))) = (proven, self.global) {
+                if !global.has_token(now, rate, burst) {
+                    return false;
+                }
             }
             if sources.len() >= LIMITER_SOURCES {
-                return false;
+                // a bucket that has refilled is the same as none; sweep at most
+                // once per refill time, so a full table costs no scan per packet
+                let refill = Duration::from_secs_f64(self.burst / self.rate);
+                if last_sweep
+                    .map(|t| now.saturating_duration_since(t) >= refill)
+                    .unwrap_or(true)
+                {
+                    *last_sweep = Some(now);
+                    sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
+                }
+                // proven sources are bounded by the open TCP connections
+                if sources.len() >= LIMITER_SOURCES && !proven {
+                    return self.allow_when_full;
+                }
             }
         }
         let bucket = sources
@@ -804,8 +858,23 @@ mod tests {
     }
 
     #[test]
-    fn test_nat_source_table_is_bounded() {
+    fn spoofed_sources_cannot_fill_the_test_nat_table() {
         let limiter = RateLimiter::test_nat(TEST_NAT_GLOBAL_RATE);
+        let t0 = Instant::now();
+        for i in 0..LIMITER_SOURCES as u32 {
+            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), false);
+        }
+        let len = |l: &RateLimiter| l.inner.lock().unwrap().sources.len();
+        // only as many new sources as the global budget had tokens
+        assert_eq!(len(&limiter), 2 * TEST_NAT_GLOBAL_RATE as usize);
+        // a proven source still gets its own budget
+        assert!(limiter.allow_at(t0, "1.1.1.1".parse().unwrap(), true));
+    }
+
+    #[test]
+    fn source_table_is_bounded() {
+        // no global budget: the table itself is the limit
+        let limiter = RateLimiter::new(TEST_NAT_BURST, TEST_NAT_RATE, None, false);
         let t0 = Instant::now();
         for i in 0..LIMITER_SOURCES as u32 {
             limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), false);
@@ -819,8 +888,16 @@ mod tests {
         let t1 = t0 + Duration::from_secs(1);
         assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap(), false));
         assert_eq!(limiter.inner.lock().unwrap().last_sweep, Some(t0));
+        // a proven source is not refused by a full table
+        assert!(limiter.allow_at(t1, "1.1.1.3".parse().unwrap(), true));
         assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap(), false));
-        assert_eq!(len(&limiter), 1);
+        // the IPv6 forward limiter lets unknown sources through instead
+        let limiter = RateLimiter::new(1.0, 0.001, None, true);
+        for i in 0..LIMITER_SOURCES as u32 {
+            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), false);
+        }
+        assert!(limiter.allow_at(t0, "1.1.1.1".parse().unwrap(), false));
+        assert_eq!(len(&limiter), LIMITER_SOURCES);
     }
 
     #[test]
@@ -910,6 +987,47 @@ mod tests {
     }
 
     #[test]
+    fn a_full_table_takes_from_the_heaviest_source() {
+        let routes = PunchRoutes::default();
+        let t0 = Instant::now();
+        // one source at its cap, the rest of the table from single-route sources
+        for port in 0..MAX_ROUTES_PER_IP as u16 {
+            routes.open_at(t0 + Duration::from_millis(port as u64), ctl(port), "peer01", peer_ip(), true, None);
+        }
+        let mut n = MAX_ROUTES_PER_IP;
+        'fill: for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                if n >= MAX_ROUTES {
+                    break 'fill;
+                }
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, a, b)), 1);
+                assert!(routes.open_at(t0, addr, "peer01", peer_ip(), true, None).udp);
+                n += 1;
+            }
+        }
+        let newcomer = SocketAddr::new("10.2.0.1".parse().unwrap(), 1);
+        assert!(routes.open_at(t0, newcomer, "peer01", peer_ip(), true, None).udp);
+        assert_eq!(routes.len(), MAX_ROUTES);
+        // the heavy source's oldest route went
+        assert!(routes.claim_udp_at(t0, ctl(0), "peer01", SocketAddr::new(peer_ip(), 1)).is_none());
+        assert!(routes.claim_udp_at(t0, ctl(1), "peer01", SocketAddr::new(peer_ip(), 1)).is_some());
+        // a single-route source does not take from other single-route sources
+        let routes = PunchRoutes::default();
+        let mut n = 0;
+        'fill2: for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                if n >= MAX_ROUTES {
+                    break 'fill2;
+                }
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 3, a, b)), 1);
+                routes.open_at(t0, addr, "peer01", peer_ip(), true, None);
+                n += 1;
+            }
+        }
+        assert!(!routes.open_at(t0, newcomer, "peer01", peer_ip(), true, None).udp);
+    }
+
+    #[test]
     fn routes_are_bounded() {
         let routes = PunchRoutes::default();
         for port in 0..MAX_ROUTES_PER_IP as u16 {
@@ -928,13 +1046,16 @@ mod tests {
             }
         }
         assert_eq!(routes.len(), MAX_ROUTES);
+        // full: a newcomer takes the oldest route of the heaviest source (10.0.0.1)
         let late = SocketAddr::new("10.2.0.1".parse().unwrap(), 1);
-        assert!(!routes.open(late, "peer01", peer_ip(), true, None).udp);
-        // removing a route frees its slot and its source's count
-        routes.remove(ctl(0));
-        assert!(routes.open(ctl(9999), "peer01", peer_ip(), true, None).udp);
+        assert!(routes.open(late, "peer01", peer_ip(), true, None).udp);
+        assert_eq!(routes.len(), MAX_ROUTES);
+        // the heavy source itself cannot take a slot back
+        assert!(!routes.open(ctl(9999), "peer01", peer_ip(), true, None).udp);
         // expired routes make room again
         let later = Instant::now() + MAX_ROUTE_LIFETIME;
-        assert!(routes.open_at(later, late, "peer01", peer_ip(), true, None).udp);
+        let fresh = SocketAddr::new("10.2.0.2".parse().unwrap(), 1);
+        assert!(routes.open_at(later, fresh, "peer01", peer_ip(), true, None).udp);
+        assert_eq!(routes.len(), 1);
     }
 }

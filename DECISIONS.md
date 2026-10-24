@@ -108,8 +108,10 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **TCP frame limit 64 KiB on 21116.** The legacy codec accepted frames up to
   1 GiB. The largest legitimate rendezvous message is a `PunchHoleRequest`
   with an offer and a token (a few KiB).
-- **Key exchange offered after 500 ms of silence** (review findings KX-1 and
-  FINAL-1-1). The controlled side's plaintext connections close right after
+- **Key exchange offered after 500 ms of silence, longer on slow links**
+  (review findings KX-1, FINAL-1-1 and FINAL-2-3; the wait is 4 × the
+  handshake round trip + 100 ms, 500 ms to 3 s, read with `TCP_INFO` on
+  Linux). The controlled side's plaintext connections close right after
   sending; an unread offer would turn that close into a TCP reset. 100 ms was
   shorter than a retransmission of a lost first segment (200 ms minimum
   RTO), so 500 ms. Costs key-exchanging clients (WebRTC rounds, signed-in
@@ -179,3 +181,13 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **Switch values** (FINAL-1-3): `no`, `0`, `false`, `off` also turn a
   feature off, unknown values are logged, so a typo cannot silently leave a
   feature on without notice.
+- **Limiter and route table fairness** (FINAL-2-1, FINAL-2-2): spoofed
+  sources get no limiter entry while the global budget is empty; a full
+  route table evicts the oldest route of the heaviest source; the IPv6
+  forward limiter (non-spoofable, licensed sources) lets unknown sources
+  pass when its table is full. Remaining: during a sustained flood,
+  high-latency controllers lose UDP punching (fallback as with the original
+  server).
+- **Client 1.4.0 in the lab** (FINAL-2-4): official 1.4.0 package. Its log
+  names no connection type, so the lab takes "Relay" from hbbr's
+  `got paired` and "TCP" otherwise (the only direct type of 1.4.0).

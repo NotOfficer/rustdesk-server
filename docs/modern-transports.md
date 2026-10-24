@@ -57,15 +57,17 @@ client -> hbbs  KeyExchange { keys: [client_eph_pk, sealed_key], version: picked
 ```
 
 * `hbbs` sends its `KeyExchange` when a new TCP connection on 21116 has
-  stayed silent for 500 ms. A client that wants the exchange reads first,
-  with an 18 s timeout (common.rs:2162), so a server that stays silent costs
-  it 18 s. The controlled side's plaintext replies (TCP punch `PunchHoleSent`,
+  stayed silent for a while: 4 × the handshake round trip measured by the
+  kernel plus 100 ms, at least 500 ms and at most 3 s (500 ms where the round
+  trip cannot be read). A client that wants the exchange reads first, with an
+  18 s timeout (common.rs:2162), so a server that stays silent costs it 18 s.
+  The controlled side's plaintext replies (TCP punch `PunchHoleSent`,
   `LocalAddr`) are sent at once and the connection is closed right after,
   without reading. An unread offer would turn that close into a TCP reset,
   which can lose the reply (on packet loss, or on servers that drop unread
-  data on a reset). 500 ms is longer than a TCP retransmission of a lost
-  first segment (200 ms minimum RTO plus the round trip), so such replies
-  get no offer. Controllers that skip the exchange may wait up to ~400 ms
+  data on a reset). The wait is longer than a retransmission of a lost first
+  segment (RTO at least 200 ms, about three round trips after the
+  handshake), so such replies get no offer. Controllers that skip the exchange may wait up to ~400 ms
   for their UDP NAT test before they send (client.rs:886); if the offer comes
   first, they skip it.
 * `eph_pk` is a fresh X25519 key per connection. `keys[0]` is
@@ -252,7 +254,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 
 | Message | Arrives | New behavior |
 |---|---|---|
-| (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 500 ms (`SECURE_TCP`) |
+| (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 500 ms or more (`SECURE_TCP`) |
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
 | `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; v6 only from 1.5.0 controllers |
@@ -292,8 +294,15 @@ send more, or anything to a third address.
   * Spoofed sources could use up the global budget and so switch off UDP
     punching for everyone. Sources with an open TCP connection to hbbs are
     therefore exempt from the global budget (not from their own): the TCP
-    handshake proves their address, and a controller's UDP NAT test runs
-    while its rendezvous connection is open.
+    handshake proves their address. A new unproven source only gets an entry
+    in the limiter table while the global budget has tokens left, so spoofed
+    sources cannot fill the table either.
+  * Residual risk: a controller starts its UDP NAT test just before it opens
+    its rendezvous connection and then waits about half a round trip
+    (client.rs:891). During a flood that keeps the global budget empty, its
+    early requests are refused, and with a round trip above ~100 ms the
+    proven retries come too late. UDP punching then falls back to TCP or
+    relay, which is what the original server always did.
   * No reply goes to port 0, or to unspecified, multicast or broadcast
     addresses. A send error is logged, never treated as a socket failure.
 * **UDP `PunchHoleSent`** never causes a UDP packet. It is accepted only if
@@ -338,14 +347,14 @@ be abused to make a peer send packets to a third host:
 
 | State | Bound |
 |---|---|
-| Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route |
+| Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route. When the table is full, a newcomer takes the oldest route of the source with clearly the most routes, so one heavy user cannot lock out the others |
 | ICE per route | 128 candidates per direction |
 | ICE frames per connection | 256; a connection with more than 16 unmatched candidates is closed |
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
 | UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: 2000/s (`UDP_TEST_NAT_LIMIT`), burst twice that, not applied to sources with an open TCP connection; table 65,536 entries, a full table is swept at most every 2 s |
-| IPv6 forwards | per controller IP/64: burst 60, 1/s; table 65,536 entries |
+| IPv6 forwards | per controller IP/64: burst 60, 1/s; table 65,536 entries; when it is full (tens of thousands of licensed /64s), unknown sources pass instead of everybody being refused |
 | TCP frames on 21116 | 64 KiB per frame |
 | Key exchange | per-connection only |
 
