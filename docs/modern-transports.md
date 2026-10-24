@@ -370,9 +370,13 @@ be abused to make a peer send packets to a third host:
   about 100 datagrams). hbbs forwards only global unicast addresses with a
   port, at most 60 per controller IP and 60 per target /64 in a burst, then
   1 per second each; a request also needs the licence key and an online
-  peer id. The "1.5.0 or
-  newer" check is about compatibility, not security: the version is
-  reported by the client itself.
+  peer id. A target in the controller's own /64 (a controller that reaches
+  hbbs over IPv6) counts only per controller: the probes go to its own
+  network, and nobody else can use up its budget by naming it. For a
+  controller on IPv4 this cannot be proven, so others can still switch its
+  IPv6 P2P off by naming its /64 (it falls back to the other transports).
+  The "1.5.0 or newer" check is about compatibility, not security: the
+  version is reported by the client itself.
 * ICE candidates: chosen by each side; the peer's ICE agent sends paced
   connectivity checks to them, as in any WebRTC implementation. Bounded by
   128 candidates per route and 64 routes per controller IP.
@@ -392,7 +396,7 @@ be abused to make a peer send packets to a third host:
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
 | UDP `TestNatRequest` limiter | per IP/64: burst 60, 30/s; global: 2000/s (`UDP_TEST_NAT_LIMIT`), burst twice that, not applied to sources with an open TCP connection; table at most 65,536 entries, a full table is swept at most every 2 s |
-| IPv6 forwards | per controller IP/64 and per target /64: burst 60, 1/s each; tables at most 65,536 entries; a full controller table lets unknown controllers pass (they are licensed and cannot be spoofed), a full target table refuses unknown targets |
+| IPv6 forwards | per controller IP/64 and per target /64: burst 60, 1/s each (a target in the sender's own /64 counts only per sender); tables at most 65,536 entries; a full controller table lets unknown controllers pass (they are licensed and cannot be spoofed), a full target table refuses unknown targets |
 | TCP frames on 21116 | 64 KiB per frame |
 | Key exchange | per-connection only |
 

@@ -444,6 +444,46 @@ impl Bucket {
     }
 }
 
+/// The limits on IPv6 addresses hbbs hands on, since the receiving peer sends
+/// punch probes to them: per sender and per target /64, whoever names it. An
+/// address in the sender's own /64 (a sender that reaches hbbs over IPv6) is
+/// counted per sender only: the probes then go to the sender's own network,
+/// and nobody else can use up its budget by naming it.
+pub(crate) struct V6Limits {
+    sender: RateLimiter,
+    target: RateLimiter,
+}
+
+impl Default for V6Limits {
+    fn default() -> Self {
+        Self {
+            sender: RateLimiter::ipv6_forward(),
+            target: RateLimiter::ipv6_target(),
+        }
+    }
+}
+
+impl V6Limits {
+    /// A controller's address on its way to the peer.
+    pub(crate) fn forward(&self, sender: IpAddr, target: IpAddr) -> bool {
+        self.forward_at(Instant::now(), sender, target)
+    }
+
+    /// The peer's address on its way back to the controller; the controller's
+    /// request has already been counted per sender.
+    pub(crate) fn reply(&self, sender: IpAddr, target: IpAddr) -> bool {
+        self.target_at(Instant::now(), sender, target)
+    }
+
+    fn forward_at(&self, now: Instant, sender: IpAddr, target: IpAddr) -> bool {
+        self.sender.allow_at(now, sender, false) && self.target_at(now, sender, target)
+    }
+
+    fn target_at(&self, now: Instant, sender: IpAddr, target: IpAddr) -> bool {
+        same_host(sender, target) || self.target.allow_at(now, target, false)
+    }
+}
+
 /// Token buckets per source IP (IPv6: per /64), and optionally in total.
 pub(crate) struct RateLimiter {
     burst: f64,
@@ -997,6 +1037,27 @@ mod tests {
         for i in 0..1000u32 {
             assert!(limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), false));
         }
+    }
+
+    #[test]
+    fn ipv6_targets_are_limited_unless_they_are_the_senders_own() {
+        let limits = V6Limits::default();
+        let t0 = Instant::now();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let victim = ip("2001:db8:1:2::99");
+        // many senders naming one target use up its budget
+        let n = (0..100u32)
+            .filter(|i| limits.forward_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), victim))
+            .count();
+        assert_eq!(n, IPV6_FORWARD_BURST as usize);
+        assert!(!limits.reply(ip("10.9.9.9"), victim));
+        // its owner, reaching hbbs from that /64, still gets through
+        assert!(limits.forward_at(t0, ip("2001:db8:1:2::5"), victim));
+        assert!(limits.target_at(t0, ip("2001:db8:1:2::7"), victim));
+        // but not past its own sender budget
+        let own = ip("2001:db8:7:7::1");
+        let n = (0..100).filter(|_| limits.forward_at(t0, own, own)).count();
+        assert_eq!(n, IPV6_FORWARD_BURST as usize);
     }
 
     #[test]

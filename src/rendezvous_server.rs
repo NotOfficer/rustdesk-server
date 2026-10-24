@@ -128,8 +128,7 @@ pub struct RendezvousServer {
     tcp_punch: Arc<Mutex<HashMap<SocketAddr, SharedSink>>>,
     routes: Arc<PunchRoutes>,
     test_nat: Arc<RateLimiter>,
-    ipv6_forward: Arc<RateLimiter>,
-    ipv6_target: Arc<RateLimiter>,
+    ipv6_limits: Arc<punch::V6Limits>,
     tcp_hosts: Arc<TcpHosts>,
     pm: PeerMap,
     tx: Sender,
@@ -194,8 +193,7 @@ impl RendezvousServer {
                     .filter(|n| *n > 0)
                     .unwrap_or(punch::TEST_NAT_GLOBAL_RATE),
             )),
-            ipv6_forward: Arc::new(RateLimiter::ipv6_forward()),
-            ipv6_target: Arc::new(RateLimiter::ipv6_target()),
+            ipv6_limits: Default::default(),
             tcp_hosts: Default::default(),
             pm,
             tx: tx.clone(),
@@ -634,7 +632,7 @@ impl RendezvousServer {
                     rr.socket_addr_v6 = if self.relay_forced(addr, addr_b) {
                         Default::default()
                     } else {
-                        self.reply_v6(&rr.socket_addr_v6, &grant)
+                        self.reply_v6(&rr.socket_addr_v6, addr, &grant)
                     };
                     if !self.answer_allowed(&rr.webrtc_sdp_answer, &grant) {
                         rr.webrtc_sdp_answer.clear();
@@ -774,7 +772,7 @@ impl RendezvousServer {
         };
         let mut p = PunchHoleResponse {
             socket_addr: AddrMangle::encode(addr).into(),
-            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, &grant),
+            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, addr, &grant),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
             webrtc_sdp_answer,
@@ -824,7 +822,7 @@ impl RendezvousServer {
         };
         let mut p = PunchHoleResponse {
             socket_addr: AddrMangle::encode(addr).into(),
-            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, &grant),
+            socket_addr_v6: self.reply_v6(&phs.socket_addr_v6, addr, &grant),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server,
             is_udp: true,
@@ -858,7 +856,7 @@ impl RendezvousServer {
         let grant = self.reply_grant(addr_a, &la.id, addr, ws);
         let mut p = PunchHoleResponse {
             socket_addr: la.local_addr.clone(),
-            socket_addr_v6: self.reply_v6(&la.socket_addr_v6, &grant),
+            socket_addr_v6: self.reply_v6(&la.socket_addr_v6, addr, &grant),
             pk: self.get_pk(&la.version, la.id).await,
             relay_server: la.relay_server,
             ..Default::default()
@@ -961,9 +959,7 @@ impl RendezvousServer {
                 // and per target
                 let target = punch::decode_addr(&socket_addr_v6).map(|a| a.ip());
                 if let Some(target) = target {
-                    if !self.ipv6_forward.allow(addr.ip(), false)
-                        || !self.ipv6_target.allow(target, false)
-                    {
+                    if !self.ipv6_limits.forward(addr.ip(), target) {
                         log::debug!("Too many IPv6 punch requests from {:?}", addr);
                         socket_addr_v6 = Bytes::new();
                     }
@@ -1205,13 +1201,13 @@ impl RendezvousServer {
     // The peer's IPv6 address goes back only where the controller's went to the
     // peer, so not past a forced relay or to a 1.4.x controller, and it counts
     // against the per-target limit: the controller punches it.
-    fn reply_v6(&self, addr: &Bytes, grant: &punch::Grant) -> Bytes {
+    fn reply_v6(&self, peer_v6: &Bytes, sender: SocketAddr, grant: &punch::Grant) -> Bytes {
         if !grant.v6 {
             return Bytes::new();
         }
-        let v6 = forward_v6(addr);
+        let v6 = forward_v6(peer_v6);
         match punch::decode_addr(&v6) {
-            Some(target) if self.ipv6_target.allow(target.ip(), false) => v6,
+            Some(target) if self.ipv6_limits.reply(sender.ip(), target.ip()) => v6,
             _ => Bytes::new(),
         }
     }

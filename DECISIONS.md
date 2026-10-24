@@ -225,7 +225,12 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   controllers cannot point peers at one victim; a full target table refuses
   unknown targets (an attacker with many /64s can switch IPv6 P2P off for
   new requests; fallback as with the original server). The NAT-test limiter
-  table never grows past its cap.
+  table never grows past its cap. A target in the sender's own /64 is not
+  counted per target (extra review OPUS-2): anyone with the licence key could
+  otherwise use up a victim's budget by naming its /64 and switch its IPv6
+  P2P off. This protects senders that reach hbbs over IPv6; for a sender on
+  IPv4 its address cannot be proven, so it keeps that residual risk (only
+  IPv6 P2P is lost, the other transports go on).
 - **Legacy controlled peers are remembered** (FINAL-6-1). A 1.4.x
   controlled side that gets a `udp_port` punches UDP only (no TCP punch),
   with probes 1.5.0 does not answer. The registration carries no version, so
