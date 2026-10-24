@@ -72,3 +72,17 @@ the extra `KeyExchange`, licence key on every new path, bounds, logging, no
 | FINAL-1-2 | About 2000 spoofed `TestNatRequest`s per second keep the global budget empty, so genuine controllers get no answer and lose UDP punching (fail closed). Proven with 15,000 loopback sources. | Valid (minor) | `79080f9`: sources with an open TCP connection to hbbs (address proven) skip the global budget; global limit configurable (`UDP_TEST_NAT_LIMIT`). Test `connected_controllers_keep_their_nat_test` (fails without the fix). |
 | FINAL-1-3 | The switches only turn off on `N`; `false`, `0`, `no`, `off` silently leave a feature on. | Valid (minor) | `79080f9`: those values turn it off, other values log a warning. Tests `switch_values_*`. |
 | FINAL-1-4 | Docs claim clients that skip the exchange "send at once", but 1.5.0 controllers wait up to ~400 ms for their UDP NAT test and may see the offer first; no test covered that order. | Valid (docs/test) | `79080f9`: docs corrected, test `offer_after_half_a_second_then_plaintext`. |
+
+### Round 2 (`873230e..a7de31a`, now including the lab)
+
+No critical or major findings. Confirmed again: key exchange, IPv6, WebRTC,
+UDP paths against 1.5.0/1.4.9/1.4.1/1.4.0; the differential test passes
+against the original binary; licence key, logging, robustness, database and
+key files unchanged.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-2-1 | (a) The limiter checks "table full" before `proven`, and spoofed sources get entries even when the global budget is empty, so a ~33k pps spoofed flood keeps the table full and refuses proven controllers too. Proven with a unit test. (b) The client starts its UDP NAT test before the TCP connect and waits only rtt/2 afterwards, so under a flood high-latency controllers are not rescued. | (a) Valid (minor); (b) valid, residual | `9c6f140`: unproven new sources only get an entry while the global budget has tokens (table can no longer be filled by spoofing); proven sources skip the full check. Unit tests `spoofed_sources_cannot_fill_the_test_nat_table`, `source_table_is_bounded`; test `nat_test_retry_after_the_connect_is_answered` in the client's order. (b) documented as residual risk (falls back to TCP/relay, the original behavior). |
+| FINAL-2-2 | One licence holder with an IPv6 /48 can fill the global route table (157 /64s × 64 routes) and the IPv6-forward limiter table, so other users get no UDP/WebRTC/IPv6. Proven with a unit test. | Valid (minor) | `9c6f140`: a full route table evicts the oldest route of the source with clearly the most routes; the IPv6 forward limiter (licensed, non-spoofable sources) lets unknown sources pass when full. Unit test `a_full_table_takes_from_the_heaviest_source`. |
+| FINAL-2-3 | 500 ms is not enough on high-latency lossy links: the first RTO after the handshake is about 3 × RTT, so for RTT above ~250 ms the offer can still win and reset the reply; the doc's timing argument was wrong. | Valid (minor) | `9c6f140`: delay = 4 × kernel-measured handshake RTT + 100 ms (500 ms to 3 s, `TCP_INFO`), docs corrected. Unit tests `kx_offer_delay_follows_the_round_trip`, `tcp_rtt_reads_the_handshake`. |
+| FINAL-2-4 | The lab never runs a real 1.4.0 client, although 1.4.0 has its own code paths. | Valid (test gap) | `a9745e1`: lab cases `client-1.4.0`, `baseline-client-1.4.0`, `mixed-1.4.0-controller`, `mixed-1.4.0-controlled` (signed-in clients need an API server and are covered by the integration tests only). |
