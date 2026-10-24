@@ -57,13 +57,17 @@ client -> hbbs  KeyExchange { keys: [client_eph_pk, sealed_key], version: picked
 ```
 
 * `hbbs` sends its `KeyExchange` when a new TCP connection on 21116 has
-  stayed silent for 100 ms. A client that wants the exchange reads first,
+  stayed silent for 500 ms. A client that wants the exchange reads first,
   with an 18 s timeout (common.rs:2162), so a server that stays silent costs
-  it 18 s. Clients that skip the exchange send their request at once, and
-  the controlled side often closes right after without reading. An unread
-  offer would turn that close into a TCP reset, which can lose the request
-  (on packet loss, or on servers that drop unread data on a reset), so they
-  get no offer.
+  it 18 s. The controlled side's plaintext replies (TCP punch `PunchHoleSent`,
+  `LocalAddr`) are sent at once and the connection is closed right after,
+  without reading. An unread offer would turn that close into a TCP reset,
+  which can lose the reply (on packet loss, or on servers that drop unread
+  data on a reset). 500 ms is longer than a TCP retransmission of a lost
+  first segment (200 ms minimum RTO plus the round trip), so such replies
+  get no offer. Controllers that skip the exchange may wait up to ~400 ms
+  for their UDP NAT test before they send (client.rs:886); if the offer comes
+  first, they skip it.
 * `eph_pk` is a fresh X25519 key per connection. `keys[0]` is
   `sign(eph_pk)` with the server's Ed25519 key, the one in `id_ed25519`.
 * **Version 1** (what 1.5.0 negotiates, `KX_VERSION_LATEST = 1`):
@@ -218,7 +222,9 @@ hbbr is not affected; hbbr is not changed.
 | `WEBRTC` | `--webrtc` | `Y` | offers and answers are dropped; `IceCandidate` closes the connection as before |
 | `UDP_PUNCH` | `--udp-punch` | `Y` | UDP `TestNatRequest` is not answered, `udp_port` is dropped, UDP `PunchHoleSent` is ignored |
 
-Values: `N` (case-insensitive) turns a feature off, anything else leaves it on.
+Values: `N`, `no`, `0`, `false` or `off` (case-insensitive) turn a feature
+off; `Y`, `yes`, `1`, `true`, `on` or nothing leave it on; any other value
+leaves it on and logs a warning.
 
 ### Punch routes
 
@@ -246,7 +252,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 
 | Message | Arrives | New behavior |
 |---|---|---|
-| (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 100 ms (`SECURE_TCP`) |
+| (accept) | TCP 21116 | send `KeyExchange` v1 if the client stays silent for 500 ms (`SECURE_TCP`) |
 | `KeyExchange` | TCP, first frame | complete the exchange (v0 or v1); afterwards decrypt/encrypt every frame |
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
 | `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; v6 only from 1.5.0 controllers |
@@ -281,8 +287,13 @@ send more, or anything to a third address.
     payload for the client's 3-byte request. On the wire (with IP/UDP headers)
     that is at most ~1.15x, one packet per packet.
   * It is rate-limited per source IP (IPv6: per /64) with a token bucket, and
-    globally. When the limiter table is full, requests are dropped (fail
-    closed).
+    globally (`UDP_TEST_NAT_LIMIT`, default 2000 answers per second). When
+    the limiter table is full, requests are dropped (fail closed).
+  * Spoofed sources could use up the global budget and so switch off UDP
+    punching for everyone. Sources with an open TCP connection to hbbs are
+    therefore exempt from the global budget (not from their own): the TCP
+    handshake proves their address, and a controller's UDP NAT test runs
+    while its rendezvous connection is open.
   * No reply goes to port 0, or to unspecified, multicast or broadcast
     addresses. A send error is logged, never treated as a socket failure.
 * **UDP `PunchHoleSent`** never causes a UDP packet. It is accepted only if
@@ -333,7 +344,7 @@ be abused to make a peer send packets to a third host:
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
-| UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: burst 4000, 2000/s; table 65,536 entries, a full table is swept at most every 2 s |
+| UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: 2000/s (`UDP_TEST_NAT_LIMIT`), burst twice that, not applied to sources with an open TCP connection; table 65,536 entries, a full table is swept at most every 2 s |
 | IPv6 forwards | per controller IP/64: burst 60, 1/s; table 65,536 entries |
 | TCP frames on 21116 | 64 KiB per frame |
 | Key exchange | per-connection only |

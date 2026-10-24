@@ -8,7 +8,7 @@ use hbb_common::try_into_v4;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -35,8 +35,8 @@ const MAX_UNANSWERED_OFFERS: u8 = 2;
 // UDP TestNatRequest answers per source IP (IPv6: per /64) and in total
 const TEST_NAT_BURST: f64 = 20.0;
 const TEST_NAT_RATE: f64 = 10.0;
-const TEST_NAT_GLOBAL_BURST: f64 = 4000.0;
-const TEST_NAT_GLOBAL_RATE: f64 = 2000.0;
+// in total per second by default (UDP_TEST_NAT_LIMIT); the burst is twice that
+pub(crate) const TEST_NAT_GLOBAL_RATE: u32 = 2000;
 // IPv6 addresses a controller IP (IPv6: /64) may hand to peers
 const IPV6_FORWARD_BURST: f64 = 60.0;
 const IPV6_FORWARD_RATE: f64 = 1.0;
@@ -395,13 +395,10 @@ impl RateLimiter {
     }
 
     /// UDP TestNatRequest answers. Their source can be spoofed, so every answer
-    /// is a packet to a possible victim.
-    pub(crate) fn test_nat() -> Self {
-        Self::new(
-            TEST_NAT_BURST,
-            TEST_NAT_RATE,
-            Some((TEST_NAT_GLOBAL_BURST, TEST_NAT_GLOBAL_RATE)),
-        )
+    /// is a packet to a possible victim. `global_rate` caps all sources together.
+    pub(crate) fn test_nat(global_rate: u32) -> Self {
+        let rate = global_rate.max(1) as f64;
+        Self::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((2.0 * rate, rate)))
     }
 
     /// IPv6 addresses forwarded from a controller: the peer sends punch probes
@@ -410,11 +407,13 @@ impl RateLimiter {
         Self::new(IPV6_FORWARD_BURST, IPV6_FORWARD_RATE, None)
     }
 
-    pub(crate) fn allow(&self, ip: IpAddr) -> bool {
-        self.allow_at(Instant::now(), ip)
+    /// `proven`: the source is known not to be spoofed, so the global budget,
+    /// which spoofed sources could use up, does not apply to it.
+    pub(crate) fn allow(&self, ip: IpAddr, proven: bool) -> bool {
+        self.allow_at(Instant::now(), ip, proven)
     }
 
-    fn allow_at(&self, now: Instant, ip: IpAddr) -> bool {
+    fn allow_at(&self, now: Instant, ip: IpAddr, proven: bool) -> bool {
         let source = source_key(ip);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let LimiterState {
@@ -441,10 +440,56 @@ impl RateLimiter {
             .entry(source)
             .or_insert_with(|| Bucket::full(now, self.burst));
         bucket.take(now, self.rate, self.burst)
-            && self
-                .global
-                .map(|(burst, rate)| global.take(now, rate, burst))
-                .unwrap_or(true)
+            && (proven
+                || self
+                    .global
+                    .map(|(burst, rate)| global.take(now, rate, burst))
+                    .unwrap_or(true))
+    }
+}
+
+/// Hosts (IPv4 address or IPv6 /64) with an open TCP connection to the main
+/// port: the TCP handshake proves they are not spoofed. Bounded by the open
+/// connections.
+#[derive(Default)]
+pub(crate) struct TcpHosts {
+    map: Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// Counts one connection of a host until dropped.
+pub(crate) struct TcpHost {
+    hosts: Arc<TcpHosts>,
+    source: IpAddr,
+}
+
+impl TcpHosts {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, usize>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn enter(self: &Arc<Self>, ip: IpAddr) -> TcpHost {
+        let source = source_key(ip);
+        *self.lock().entry(source).or_default() += 1;
+        TcpHost {
+            hosts: self.clone(),
+            source,
+        }
+    }
+
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        self.lock().contains_key(&source_key(ip))
+    }
+}
+
+impl Drop for TcpHost {
+    fn drop(&mut self) {
+        let mut map = self.hosts.lock();
+        if let Some(n) = map.get_mut(&self.source) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.source);
+            }
+        }
     }
 }
 
@@ -709,53 +754,72 @@ mod tests {
 
     #[test]
     fn test_nat_is_limited_per_source_and_in_total() {
-        let limiter = RateLimiter::test_nat();
+        let limiter = RateLimiter::test_nat(TEST_NAT_GLOBAL_RATE);
         let t0 = Instant::now();
         let a: IpAddr = "1.2.3.4".parse().unwrap();
-        let n = (0..100).filter(|_| limiter.allow_at(t0, a)).count();
+        let n = (0..100).filter(|_| limiter.allow_at(t0, a, false)).count();
         assert_eq!(n, TEST_NAT_BURST as usize);
         // the mapped form is the same source
-        assert!(!limiter.allow_at(t0, "::ffff:1.2.3.4".parse().unwrap()));
-        assert!(limiter.allow_at(t0, "1.2.3.5".parse().unwrap()));
+        assert!(!limiter.allow_at(t0, "::ffff:1.2.3.4".parse().unwrap(), false));
+        assert!(limiter.allow_at(t0, "1.2.3.5".parse().unwrap(), false));
         // refills at the rate
         let t1 = t0 + Duration::from_millis(500);
-        let n = (0..100).filter(|_| limiter.allow_at(t1, a)).count();
+        let n = (0..100).filter(|_| limiter.allow_at(t1, a, false)).count();
         assert_eq!(n, (TEST_NAT_RATE / 2.0) as usize);
         // a /64 is one source
         let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
         let n = (0..100)
-            .filter(|i| limiter.allow_at(t0, v6(&format!("2001:db8::{:x}", i + 1))))
+            .filter(|i| limiter.allow_at(t0, v6(&format!("2001:db8::{:x}", i + 1)), false))
             .count();
         assert_eq!(n, TEST_NAT_BURST as usize);
-        assert!(limiter.allow_at(t0, v6("2001:db8:0:1::1")));
+        assert!(limiter.allow_at(t0, v6("2001:db8:0:1::1"), false));
         // the global bucket caps all sources together
-        let limiter = RateLimiter::test_nat();
+        let limiter = RateLimiter::test_nat(TEST_NAT_GLOBAL_RATE);
         let mut n = 0;
-        for i in 0..(TEST_NAT_GLOBAL_BURST as u32 + 100) {
-            if limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))) {
+        for i in 0..(2 * TEST_NAT_GLOBAL_RATE + 100) {
+            if limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), false) {
                 n += 1;
             }
         }
-        assert_eq!(n, TEST_NAT_GLOBAL_BURST as u32);
+        assert_eq!(n, 2 * TEST_NAT_GLOBAL_RATE);
+        // a proven source still gets its own budget when the global one is empty
+        let proven: IpAddr = "192.0.2.1".parse().unwrap();
+        assert!(!limiter.allow_at(t0, "192.0.2.2".parse().unwrap(), false));
+        let n = (0..100).filter(|_| limiter.allow_at(t0, proven, true)).count();
+        assert_eq!(n, TEST_NAT_BURST as usize);
+    }
+
+    #[test]
+    fn tcp_hosts_count_open_connections() {
+        let hosts = Arc::new(TcpHosts::default());
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        let a = hosts.enter(ip);
+        let b = hosts.enter("2001:db8::2".parse().unwrap());
+        assert!(hosts.contains("2001:db8::99".parse().unwrap()));
+        drop(a);
+        assert!(hosts.contains(ip));
+        drop(b);
+        assert!(!hosts.contains(ip));
+        assert!(hosts.lock().is_empty());
     }
 
     #[test]
     fn test_nat_source_table_is_bounded() {
-        let limiter = RateLimiter::test_nat();
+        let limiter = RateLimiter::test_nat(TEST_NAT_GLOBAL_RATE);
         let t0 = Instant::now();
         for i in 0..LIMITER_SOURCES as u32 {
-            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)));
+            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), false);
         }
         let len = |l: &RateLimiter| l.inner.lock().unwrap().sources.len();
         assert_eq!(len(&limiter), LIMITER_SOURCES);
         // full: a new source is refused until old buckets have refilled
-        assert!(!limiter.allow_at(t0, "1.1.1.1".parse().unwrap()));
+        assert!(!limiter.allow_at(t0, "1.1.1.1".parse().unwrap(), false));
         assert_eq!(len(&limiter), LIMITER_SOURCES);
         // and the next sweep waits for the refill time
         let t1 = t0 + Duration::from_secs(1);
-        assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap()));
+        assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap(), false));
         assert_eq!(limiter.inner.lock().unwrap().last_sweep, Some(t0));
-        assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap()));
+        assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap(), false));
         assert_eq!(len(&limiter), 1);
     }
 
@@ -764,12 +828,12 @@ mod tests {
         let limiter = RateLimiter::ipv6_forward();
         let t0 = Instant::now();
         let a: IpAddr = "1.2.3.4".parse().unwrap();
-        let n = (0..100).filter(|_| limiter.allow_at(t0, a)).count();
+        let n = (0..100).filter(|_| limiter.allow_at(t0, a, false)).count();
         assert_eq!(n, IPV6_FORWARD_BURST as usize);
-        assert!(limiter.allow_at(t0 + Duration::from_secs(1), a));
+        assert!(limiter.allow_at(t0 + Duration::from_secs(1), a, false));
         // no global cap
         for i in 0..1000u32 {
-            assert!(limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))));
+            assert!(limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), false));
         }
     }
 

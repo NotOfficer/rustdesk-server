@@ -473,3 +473,22 @@ async fn websocket_ice_candidate_closes_as_before() {
     .await;
     assert_eq!(closed, Ok(true));
 }
+
+#[tokio::test]
+async fn switch_values_false_and_off_turn_features_off() {
+    let hbbs = Hbbs::start(&[("WEBRTC", "false"), ("IPV6_PUNCH", "off"), ("UDP_PUNCH", "0")], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
+    let mut req = punch_hole_request("peer01", &hbbs.key);
+    req.webrtc_sdp_offer = offer();
+    req.udp_port = 40000;
+    req.socket_addr_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert!(ph.webrtc_sdp_offer.is_empty());
+    assert!(ph.socket_addr_v6.is_empty());
+    assert_eq!(ph.udp_port, 0);
+    for line in ["WEBRTC=N", "IPV6_PUNCH=N", "UDP_PUNCH=N"] {
+        assert!(hbbs.log().contains(line), "{}", line);
+    }
+}

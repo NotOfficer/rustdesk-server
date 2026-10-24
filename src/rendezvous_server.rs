@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::key_exchange;
 use crate::peer::*;
-use crate::punch::{self, PunchRoutes, RateLimiter};
+use crate::punch::{self, PunchRoutes, RateLimiter, TcpHosts};
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -52,8 +52,11 @@ enum Data {
 const REG_TIMEOUT: i64 = 30_000;
 // largest rendezvous frame accepted on TCP; a PunchHoleRequest with an offer is a few KiB
 const MAX_TCP_FRAME: usize = 64 * 1024;
-// how long a new TCP connection may speak first before the key exchange is offered
-const KX_OFFER_DELAY: u64 = 100;
+// How long a new TCP connection may speak first before the key exchange is
+// offered: longer than a TCP retransmission of a lost first segment (200 ms
+// minimum RTO plus the round trip), so the controlled side's reply is not cut
+// off by a reset. Clients that want the exchange wait for it.
+const KX_OFFER_DELAY: u64 = 500;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
@@ -127,6 +130,7 @@ pub struct RendezvousServer {
     routes: Arc<PunchRoutes>,
     test_nat: Arc<RateLimiter>,
     ipv6_forward: Arc<RateLimiter>,
+    tcp_hosts: Arc<TcpHosts>,
     pm: PeerMap,
     tx: Sender,
     relay_servers: Arc<RelayServers>,
@@ -183,8 +187,15 @@ impl RendezvousServer {
         let mut rs = Self {
             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
             routes: Default::default(),
-            test_nat: Arc::new(RateLimiter::test_nat()),
+            test_nat: Arc::new(RateLimiter::test_nat(
+                get_arg("UDP_TEST_NAT_LIMIT")
+                    .parse()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .unwrap_or(punch::TEST_NAT_GLOBAL_RATE),
+            )),
             ipv6_forward: Arc::new(RateLimiter::ipv6_forward()),
+            tcp_hosts: Default::default(),
             pm,
             tx: tx.clone(),
             relay_servers: Default::default(),
@@ -523,7 +534,9 @@ impl RendezvousServer {
                     // nothing else, so the answer is not larger than needed, rate-limited
                     if UDP_PUNCH.load(Ordering::SeqCst)
                         && punch::replyable(addr)
-                        && self.test_nat.allow(addr.ip())
+                        && self
+                            .test_nat
+                            .allow(addr.ip(), self.tcp_hosts.contains(addr.ip()))
                     {
                         let mut msg_out = RendezvousMessage::new();
                         msg_out.set_test_nat_response(TestNatResponse {
@@ -921,7 +934,7 @@ impl RendezvousServer {
             // they relay (punch_udp), so IPv6 starts with 1.5.0
             if direct && punch::version_at_least(&ph.version, (1, 5, 0)) {
                 socket_addr_v6 = forward_v6(&ph.socket_addr_v6);
-                if !socket_addr_v6.is_empty() && !self.ipv6_forward.allow(addr.ip()) {
+                if !socket_addr_v6.is_empty() && !self.ipv6_forward.allow(addr.ip(), false) {
                     log::debug!("Too many IPv6 punch requests from {:?}", addr);
                     socket_addr_v6 = Bytes::new();
                 }
@@ -1462,6 +1475,9 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
+        // a controller's UDP NAT test runs while it is connected; WebSocket
+        // addresses can come from a header, so only plain TCP counts
+        let _tcp_host = (!ws).then(|| self.tcp_hosts.enter(addr.ip()));
         let mut sink;
         if ws {
             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -1675,10 +1691,13 @@ fn forward_v6(addr: &Bytes) -> Bytes {
     }
 }
 
-// Feature switches default to on; "N" turns them off.
+// Feature switches default to on; "N" (or no, 0, false, off) turns them off.
 fn load_switch(name: &str, switch: &AtomicBool) {
-    if get_arg(name).to_uppercase() == "N" {
-        switch.store(false, Ordering::SeqCst);
+    let value = get_arg(name).trim().to_uppercase();
+    match value.as_str() {
+        "N" | "NO" | "0" | "FALSE" | "OFF" => switch.store(false, Ordering::SeqCst),
+        "" | "Y" | "YES" | "1" | "TRUE" | "ON" => {}
+        _ => log::warn!("{}={} is neither Y nor N, the feature stays on", name, value),
     }
     log::info!(
         "{}={}",

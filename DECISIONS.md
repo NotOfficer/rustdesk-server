@@ -108,10 +108,13 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
 - **TCP frame limit 64 KiB on 21116.** The legacy codec accepted frames up to
   1 GiB. The largest legitimate rendezvous message is a `PunchHoleRequest`
   with an offer and a token (a few KiB).
-- **Key exchange offered after 100 ms of silence** (review finding KX-1). The
-  controlled side's plaintext connections close right after sending; an
-  unread offer would turn that close into a TCP reset. Costs key-exchanging
-  clients 100 ms per connection.
+- **Key exchange offered after 500 ms of silence** (review findings KX-1 and
+  FINAL-1-1). The controlled side's plaintext connections close right after
+  sending; an unread offer would turn that close into a TCP reset. 100 ms was
+  shorter than a retransmission of a lost first segment (200 ms minimum
+  RTO), so 500 ms. Costs key-exchanging clients (WebRTC rounds, signed-in
+  clients, the controlled side's answer and ICE connections) 500 ms per
+  connection.
 - **IPv6 only from 1.5.0 controllers** (review finding IPV6-3). 1.4.x
   controllers send `socket_addr_v6`, but their IPv6 attempt can hold up the
   relay fallback for up to 20 s, a regression against the original server.
@@ -169,3 +172,10 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   a session arrive at the same moment, `make_pair_` in `src/relay_server.rs`
   can leave both unpaired and the clients retry. Pre-existing upstream
   behavior, outside the scope ("hbbr only if really necessary").
+- **TCP-connected sources skip the global NAT-test budget** (FINAL-1-2).
+  Spoofed sources could empty it; a source with an open TCP connection is
+  proven. The global limit is configurable (`UDP_TEST_NAT_LIMIT`), which also
+  makes the behavior testable.
+- **Switch values** (FINAL-1-3): `no`, `0`, `false`, `off` also turn a
+  feature off, unknown values are logged, so a typo cannot silently leave a
+  feature on without notice.

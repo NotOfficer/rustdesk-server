@@ -435,3 +435,30 @@ async fn udp_routes_expire() {
     send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", None).await;
     assert!(ctl.expect(1000, pick_punch_hole_response).await.is_none());
 }
+
+// Spoofed sources can use up the global answer budget; a controller whose TCP
+// connection proves its address still gets its UDP NAT test answered.
+#[tokio::test]
+async fn connected_controllers_keep_their_nat_test() {
+    // 5 answers per second in total, burst 10
+    let hbbs = Hbbs::start(&[("UDP_TEST_NAT_LIMIT", "5")], &[]).await;
+    let req = test_nat_request();
+    let server = hbbs.udp_addr();
+    let _ctl = Tcp::connect(&hbbs, "127.9.9.10".parse().unwrap(), Kx::None).await;
+    let connected = udp_socket("127.9.9.10".parse().unwrap()).await;
+    let stranger = udp_socket("127.9.9.9".parse().unwrap()).await;
+    // 30 other sources use up the global budget
+    let sources: Vec<std::net::UdpSocket> = (0..30u8)
+        .filter_map(|i| std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 10, 0, i + 1), 0)).ok())
+        .collect();
+    for s in &sources {
+        s.send_to(&req, server).ok();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..5 {
+        connected.send_to(&req, server).await.unwrap();
+    }
+    stranger.send_to(&req, server).await.unwrap();
+    assert_eq!(drain(&connected, 500).await.len(), 5);
+    assert!(drain(&stranger, 100).await.is_empty());
+}

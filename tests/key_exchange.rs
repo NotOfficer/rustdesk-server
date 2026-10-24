@@ -314,3 +314,33 @@ async fn local_addr_and_relay_response_reach_an_encrypted_controller() {
     assert_eq!(rr.uuid, "uuid-1");
     assert!(!rr.pk().is_empty());
 }
+
+// Controllers that skip the exchange may wait for their UDP NAT test (up to
+// ~400 ms in 1.5.0) and then see the offer first; they skip it and send in
+// plaintext, which still works.
+#[tokio::test]
+async fn offer_after_half_a_second_then_plaintext() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let start = std::time::Instant::now();
+    let mut tcp = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    let offer = tcp.conn.next_timeout(3000).await.unwrap().unwrap();
+    assert!(matches!(
+        parse(&offer).unwrap().union,
+        Some(rendezvous_message::Union::KeyExchange(_))
+    ));
+    assert!(start.elapsed() >= std::time::Duration::from_millis(450));
+    unknown_id_round_trip(&mut tcp, &hbbs).await;
+}
+
+#[tokio::test]
+async fn switch_values_no_0_false_off_turn_it_off() {
+    for value in ["no", "0", "false", "OFF"] {
+        let hbbs = Hbbs::start(&[("SECURE_TCP", value)], &[]).await;
+        let mut conn = FramedStream::new(hbbs.tcp_addr(), None, 3000).await.unwrap();
+        assert!(conn.next_timeout(900).await.is_none(), "SECURE_TCP={}", value);
+    }
+    let hbbs = Hbbs::start(&[("SECURE_TCP", "maybe")], &[]).await;
+    assert!(hbbs.log().contains("is neither Y nor N"));
+    let tcp = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
+    assert!(tcp.secured);
+}
