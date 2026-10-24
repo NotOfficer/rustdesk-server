@@ -41,6 +41,8 @@ fn port_set_free(port: u16) -> bool {
 
 // hbbs binds with SO_REUSEPORT, so two test processes (or two tests) that pick
 // the same port would share it. A lock file per port keeps the pick exclusive.
+// hbbs also binds port - 1 and port + 2, so ports are picked in aligned blocks
+// of four: a neighbor that is not listening yet cannot take one of them.
 struct PortLock(std::path::PathBuf);
 
 impl Drop for PortLock {
@@ -53,7 +55,7 @@ fn free_port() -> (u16, PortLock) {
     let dir = std::env::temp_dir().join("hbbs-test-ports");
     std::fs::create_dir_all(&dir).ok();
     loop {
-        let port = 20_000 + (rand_u32() % 40_000) as u16;
+        let port = 20_001 + 4 * (rand_u32() % 10_000) as u16;
         let path = dir.join(port.to_string());
         let stale = std::fs::metadata(&path)
             .and_then(|m| m.modified())
