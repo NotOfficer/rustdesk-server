@@ -7,7 +7,7 @@
 use hbb_common::try_into_v4;
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -25,6 +25,12 @@ const MAX_ROUTES_PER_IP: usize = 64;
 const UDP_ROUTE_TTL: Duration = Duration::from_secs(30);
 const WEBRTC_ROUTE_TTL: Duration = Duration::from_secs(60);
 const MAX_ROUTE_LIFETIME: Duration = Duration::from_secs(120);
+// UDP TestNatRequest answers per source IP (IPv6: per /64) and in total
+const TEST_NAT_BURST: f64 = 20.0;
+const TEST_NAT_RATE: f64 = 10.0;
+const TEST_NAT_GLOBAL_BURST: f64 = 4000.0;
+const TEST_NAT_GLOBAL_RATE: f64 = 2000.0;
+const TEST_NAT_SOURCES: usize = 65_536;
 
 struct WebRtc {
     // DTLS fingerprint of the offer, the clients' ICE session key
@@ -251,6 +257,91 @@ impl PunchRoutes {
     }
 }
 
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+impl Bucket {
+    fn full(now: Instant, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            last: now,
+        }
+    }
+
+    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(burst);
+        self.last = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
+/// Token buckets for the UDP TestNatRequest answers. Its source address can be
+/// spoofed, so every answer is a packet to a possible victim: limit them per
+/// source and in total. When the source table is full, unknown sources are
+/// refused.
+pub(crate) struct TestNatLimiter {
+    inner: Mutex<(Bucket, HashMap<IpAddr, Bucket>)>,
+}
+
+impl Default for TestNatLimiter {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new((
+                Bucket::full(Instant::now(), TEST_NAT_GLOBAL_BURST),
+                HashMap::new(),
+            )),
+        }
+    }
+}
+
+impl TestNatLimiter {
+    pub(crate) fn allow(&self, ip: IpAddr) -> bool {
+        self.allow_at(Instant::now(), ip)
+    }
+
+    fn allow_at(&self, now: Instant, ip: IpAddr) -> bool {
+        let source = match try_into_v4(SocketAddr::new(ip, 0)).ip() {
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+            ip => ip,
+        };
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (global, sources) = &mut *guard;
+        if !sources.contains_key(&source) && sources.len() >= TEST_NAT_SOURCES {
+            // a bucket that has refilled is the same as none
+            let refill = Duration::from_secs_f64(TEST_NAT_BURST / TEST_NAT_RATE);
+            sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
+            if sources.len() >= TEST_NAT_SOURCES {
+                return false;
+            }
+        }
+        let bucket = sources
+            .entry(source)
+            .or_insert_with(|| Bucket::full(now, TEST_NAT_BURST));
+        bucket.take(now, TEST_NAT_RATE, TEST_NAT_BURST)
+            && global.take(now, TEST_NAT_GLOBAL_RATE, TEST_NAT_GLOBAL_BURST)
+    }
+}
+
+/// Whether a UDP answer to `addr` may be sent at all.
+pub(crate) fn replyable(addr: SocketAddr) -> bool {
+    let addr = try_into_v4(addr);
+    let ip = addr.ip();
+    addr.port() != 0
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !matches!(ip, IpAddr::V4(v4) if v4.is_broadcast())
+}
+
 /// Whether two addresses belong to the same host: equal IPv4, or the same IPv6 /64
 /// (privacy extensions give each socket another address in the prefix).
 pub(crate) fn same_host(a: IpAddr, b: IpAddr) -> bool {
@@ -469,6 +560,67 @@ mod tests {
         // no UDP granted, no claim
         routes.open(ctl(2), "peer01", peer_ip(), false, Some(FP.to_owned()));
         assert_eq!(routes.claim_udp(ctl(2), "peer01", SocketAddr::new(peer_ip(), 1)), None);
+    }
+
+    #[test]
+    fn test_nat_is_limited_per_source_and_in_total() {
+        let limiter = TestNatLimiter::default();
+        let t0 = Instant::now();
+        let a: IpAddr = "1.2.3.4".parse().unwrap();
+        let n = (0..100).filter(|_| limiter.allow_at(t0, a)).count();
+        assert_eq!(n, TEST_NAT_BURST as usize);
+        // the mapped form is the same source
+        assert!(!limiter.allow_at(t0, "::ffff:1.2.3.4".parse().unwrap()));
+        assert!(limiter.allow_at(t0, "1.2.3.5".parse().unwrap()));
+        // refills at the rate
+        let t1 = t0 + Duration::from_millis(500);
+        let n = (0..100).filter(|_| limiter.allow_at(t1, a)).count();
+        assert_eq!(n, (TEST_NAT_RATE / 2.0) as usize);
+        // a /64 is one source
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
+        let n = (0..100)
+            .filter(|i| limiter.allow_at(t0, v6(&format!("2001:db8::{:x}", i + 1))))
+            .count();
+        assert_eq!(n, TEST_NAT_BURST as usize);
+        assert!(limiter.allow_at(t0, v6("2001:db8:0:1::1")));
+        // the global bucket caps all sources together
+        let limiter = TestNatLimiter::default();
+        let mut n = 0;
+        for i in 0..(TEST_NAT_GLOBAL_BURST as u32 + 100) {
+            if limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))) {
+                n += 1;
+            }
+        }
+        assert_eq!(n, TEST_NAT_GLOBAL_BURST as u32);
+    }
+
+    #[test]
+    fn test_nat_source_table_is_bounded() {
+        let limiter = TestNatLimiter::default();
+        let t0 = Instant::now();
+        for i in 0..TEST_NAT_SOURCES as u32 {
+            limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)));
+        }
+        let len = |l: &TestNatLimiter| l.inner.lock().unwrap().1.len();
+        assert_eq!(len(&limiter), TEST_NAT_SOURCES);
+        // full: a new source is refused until old buckets have refilled
+        assert!(!limiter.allow_at(t0, "1.1.1.1".parse().unwrap()));
+        assert_eq!(len(&limiter), TEST_NAT_SOURCES);
+        assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap()));
+        assert_eq!(len(&limiter), 1);
+    }
+
+    #[test]
+    fn replyable_skips_unusable_addresses() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert!(replyable(a("1.2.3.4:5")));
+        assert!(replyable(a("[2001:db8::1]:5")));
+        assert!(!replyable(a("1.2.3.4:0")));
+        assert!(!replyable(a("0.0.0.0:5")));
+        assert!(!replyable(a("255.255.255.255:5")));
+        assert!(!replyable(a("224.0.0.1:5")));
+        assert!(!replyable(a("[::ffff:255.255.255.255]:5")));
+        assert!(!replyable(a("[ff02::1]:5")));
     }
 
     #[test]

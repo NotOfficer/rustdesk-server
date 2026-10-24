@@ -52,6 +52,7 @@ in the inherited process environment.
 | `SECURE_TCP` | `--secure-tcp` | `Y` | Offers the client key exchange (`KeyExchange`, versions 0 and 1) on every TCP connection to `PORT`, not on the NAT test or WebSocket ports. Needed by WebRTC and by signed-in clients. `N` restores the old behavior. See [modern connection types](modern-transports.md). |
 | `IPV6_PUNCH` | `--ipv6-punch` | `Y` | Passes the peers' IPv6 addresses (`socket_addr_v6`) between them, so clients with public IPv6 can connect directly over IPv6. `N` drops them. Never applied to WebSocket clients or when a relay is forced. |
 | `WEBRTC` | `--webrtc` | `Y` | Forwards WebRTC offers and answers and relays trickle ICE candidates (`IceCandidate`) between the peers. The clients only signal WebRTC over an encrypted connection, so it also needs `SECURE_TCP`. `N` drops offers and answers and treats `IceCandidate` as before. |
+| `UDP_PUNCH` | `--udp-punch` | `Y` | Answers the clients' UDP NAT test (`TestNatRequest` on UDP `PORT`, rate-limited, only the observed port), forwards `udp_port` and accepts the controlled side's UDP `PunchHoleSent` for an open request, answering the controller over its TCP connection. `N` ignores all of it, as before. |
 
 🅴 = set through the inherited process environment.
 

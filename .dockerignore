@@ -2,5 +2,4 @@ target
 .git
 lab/.cache
 lab/out
-db_v2.sqlite3*
 id_ed25519*

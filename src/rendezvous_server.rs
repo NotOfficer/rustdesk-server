@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::key_exchange;
 use crate::peer::*;
-use crate::punch::{self, PunchRoutes};
+use crate::punch::{self, PunchRoutes, TestNatLimiter};
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -71,6 +71,7 @@ static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 static SECURE_TCP: AtomicBool = AtomicBool::new(true);
 static IPV6_PUNCH: AtomicBool = AtomicBool::new(true);
 static WEBRTC: AtomicBool = AtomicBool::new(true);
+static UDP_PUNCH: AtomicBool = AtomicBool::new(true);
 // AddrMangle of an IPv6 socket address: 16 bytes address, 2 bytes port
 const MANGLED_V6_LEN: usize = 18;
 
@@ -122,6 +123,7 @@ struct IceCount {
 pub struct RendezvousServer {
     tcp_punch: Arc<Mutex<HashMap<SocketAddr, SharedSink>>>,
     routes: Arc<PunchRoutes>,
+    test_nat: Arc<TestNatLimiter>,
     pm: PeerMap,
     tx: Sender,
     relay_servers: Arc<RelayServers>,
@@ -178,6 +180,7 @@ impl RendezvousServer {
         let mut rs = Self {
             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
             routes: Default::default(),
+            test_nat: Default::default(),
             pm,
             tx: tx.clone(),
             relay_servers: Default::default(),
@@ -221,6 +224,7 @@ impl RendezvousServer {
         load_switch("SECURE_TCP", &SECURE_TCP);
         load_switch("IPV6_PUNCH", &IPV6_PUNCH);
         load_switch("WEBRTC", &WEBRTC);
+        load_switch("UDP_PUNCH", &UDP_PUNCH);
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
                 listener.local_addr()?
@@ -502,7 +506,25 @@ impl RendezvousServer {
                     // The supported client path sends PunchHoleRequest over TCP/WS.
                 }
                 Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
-                    // UDP PunchHoleSent is intentionally unsupported to avoid UDP reflection/amplification
+                    // never answered over UDP, see handle_udp_hole_sent
+                    if UDP_PUNCH.load(Ordering::SeqCst) {
+                        self.handle_udp_hole_sent(phs, addr).await;
+                    }
+                }
+                Some(rendezvous_message::Union::TestNatRequest(_)) => {
+                    // the UDP NAT test of the controller (test_udp_uat): the observed port,
+                    // nothing else, so the answer is not larger than needed, rate-limited
+                    if UDP_PUNCH.load(Ordering::SeqCst)
+                        && punch::replyable(addr)
+                        && self.test_nat.allow(addr.ip())
+                    {
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_test_nat_response(TestNatResponse {
+                            port: addr.port() as _,
+                            ..Default::default()
+                        });
+                        allow_err!(socket.send(&msg_out, addr).await);
+                    }
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
                     // UDP LocalAddr is intentionally unsupported to avoid UDP reflection/amplification
@@ -738,6 +760,42 @@ impl RendezvousServer {
         Ok(())
     }
 
+    // The controlled side's UDP PunchHoleSent (punch_udp_hole): sent from the socket
+    // it punches with, so its source is the public address the controller must
+    // punch. Accepted once, for an open UDP route of the controller named in
+    // socket_addr and from the controlled peer's host, and answered only on the
+    // controller's TCP connection. Nothing is ever sent back over UDP.
+    async fn handle_udp_hole_sent(&mut self, phs: PunchHoleSent, addr: SocketAddr) {
+        let Some(addr_a) = punch::decode_addr(&phs.socket_addr) else {
+            return;
+        };
+        if self.routes.claim_udp(addr_a, &phs.id, addr).is_none() {
+            log::debug!("Ignored UDP punch hole sent from {:?}", addr);
+            return;
+        }
+        log::debug!("UDP punch hole response to {:?} from {:?}", &addr_a, &addr);
+        let mut msg_out = RendezvousMessage::new();
+        let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
+            phs.webrtc_sdp_answer
+        } else {
+            Default::default()
+        };
+        let mut p = PunchHoleResponse {
+            socket_addr: AddrMangle::encode(addr).into(),
+            pk: self.get_pk(&phs.version, phs.id).await,
+            relay_server: phs.relay_server,
+            is_udp: true,
+            socket_addr_v6: forward_v6(&phs.socket_addr_v6),
+            webrtc_sdp_answer,
+            ..Default::default()
+        };
+        if let Ok(t) = phs.nat_type.enum_value() {
+            p.set_nat_type(t);
+        }
+        msg_out.set_punch_hole_response(p);
+        self.send_to_tcp(msg_out, addr_a).await;
+    }
+
     #[inline]
     async fn handle_local_addr<'a>(
         &mut self,
@@ -856,9 +914,14 @@ impl RendezvousServer {
                     );
                 }
             }
-            let grant = if session_key.is_some() {
+            // FetchLocalAddr has no udp_port
+            let udp = p2p
+                && UDP_PUNCH.load(Ordering::SeqCst)
+                && (1..=u16::MAX as i32).contains(&ph.udp_port)
+                && (!same_intranet || session_key.is_some());
+            let grant = if udp || session_key.is_some() {
                 self.routes
-                    .open(addr, &id, try_into_v4(peer_addr).ip(), false, session_key)
+                    .open(addr, &id, try_into_v4(peer_addr).ip(), udp, session_key)
             } else {
                 Default::default()
             };
@@ -890,6 +953,9 @@ impl RendezvousServer {
                     socket_addr_v6,
                     ..Default::default()
                 };
+                if grant.udp {
+                    punch_hole.udp_port = ph.udp_port;
+                }
                 if grant.webrtc {
                     log::debug!(
                         "WebRTC offer ({} bytes) from {:?} to {:?}",
