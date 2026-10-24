@@ -261,14 +261,14 @@ else
       item 2 "cargo test (exit status)" FAIL "exit $rc_test although every binary reported ok"
     fi
   fi
-  # cargo test captures the output of passing tests, so run compat once more uncaptured
-  # to prove it really compared against the original hbbs instead of skipping.
+  # tests/compat.rs is #[ignore]d without the original binary; run it explicitly,
+  # uncaptured, to show that it compared against the original hbbs
   if rx head 'test -f /src/tests/compat.rs'; then
-    rx head "HBBS_BASELINE_BIN=$BASE_BIN cargo test --locked --test compat -- --nocapture" \
+    rx head "HBBS_BASELINE_BIN=$BASE_BIN cargo test --locked --test compat -- --ignored --nocapture" \
       >"$OUT/level2/compat-nocapture.log" 2>&1
     rc_compat=$?
-    if grep -q "skipped" "$OUT/level2/compat-nocapture.log"; then
-      item 2 "compat: ran against the original hbbs" FAIL "$(grep -m1 skipped "$OUT/level2/compat-nocapture.log")"
+    if ! grep -q '^original: ' "$OUT/level2/compat-nocapture.log"; then
+      item 2 "compat: ran against the original hbbs" FAIL "no comparison output, see level2/compat-nocapture.log"
     elif [ "$rc_compat" != 0 ]; then
       item 2 "compat: ran against the original hbbs" FAIL "exit $rc_compat, see level2/compat-nocapture.log"
     else

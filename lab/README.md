@@ -41,8 +41,10 @@ lab/run-all-tests.sh --cases flat,lan-webrtc   # level 3 subset (case or topolog
   `cargo clippy --all-targets`. Clippy is also run on the baseline export (873230e +
   69cea8d), and any diagnostic that is new in HEAD (compared without line numbers) fails.
 - Level 2: `cargo test --no-fail-fast`, reported per test binary. A debug `hbbs` of the
-  baseline is built first and passed as `HBBS_BASELINE_BIN`. `tests/compat.rs` is run
-  once more uncaptured and fails the level if it printed "skipped".
+  baseline is built first and passed as `HBBS_BASELINE_BIN`. `tests/compat.rs` (the
+  comparison with the original hbbs) is `#[ignore]`d in a plain `cargo test`, so it is
+  run explicitly with `--ignored`, uncaptured, and fails the level unless it printed
+  its `original:`/`modern:` comparison.
 - Level 3: builds `rustdesk-server-modern:dev` from the same export
   (`docker-classic/Dockerfile.multistage`), rebuilds the baseline image, and runs the
   whole lab matrix (`run-lab.sh`, all topologies).
