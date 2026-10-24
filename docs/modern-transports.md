@@ -36,7 +36,7 @@ TCP connection to hbbs:21116 and its own `PunchHoleRequest`:
 * the **fallback round** is a plain TCP punch without any of them. It only
   exists if TCP punch is allowed (`tcp_punch_allowed`, client.rs:351).
 
-The rounds race (`race_transports_prefer_webrtc`, client.rs:214): a direct
+The rounds race (`race_transports_prefer_webrtc`, client.rs:220): a direct
 result wins immediately, a relayed one waits `relay-fallback-delay` (2.5 s).
 Each round sends its `PunchHoleRequest` up to three times (3 s, 6 s, 9 s
 windows) and reads responses with `get_next_nonkeyexchange_msg`, which skips
@@ -182,7 +182,7 @@ hbbs -tcp-> A      IceCandidate { session_key, candidate }                (on A'
   ice_policy}`), about 700 bytes, without candidates (webrtc.rs:993).
 * `session_key` is the DTLS fingerprint of the **offer** SDP (`a=fingerprint`),
   e.g. `sha-256 AB:CD:…`. Both peers match candidates only by it
-  (client.rs:591, rendezvous_mediator.rs:560).
+  (client.rs:590, rendezvous_mediator.rs:560).
 * A sends candidates only after it has the answer, and each one twice
   (400 ms apart). It keeps the punch connection open while `connect()` runs
   and never reconnects it (client.rs:671).
@@ -229,8 +229,9 @@ asked for UDP and/or WebRTC. It is keyed by A's TCP address (the
 * the target peer id;
 * B's registered IP at the time of the request (for the UDP check);
 * whether UDP was granted, and whether the UDP answer was already used;
-* for WebRTC, the session key taken from the offer and the number of
-  candidates forwarded in each direction;
+* for WebRTC, the session key taken from the offer, how often the offer was
+  forwarded, and the number of candidates forwarded in each direction;
+* whether any response from B reached A;
 * creation and expiry time.
 
 A route is created only by a `PunchHoleRequest` that passed every existing
@@ -276,9 +277,9 @@ send more, or anything to a third address.
 
 * **UDP `TestNatRequest`** is the only new UDP message that gets a UDP reply.
   * The reply goes only to the packet's source address. It is
-    `TestNatResponse { port }` only, never a `ConfigUpdate`: about 6 bytes of
-    payload for a request of about 3 bytes. On the wire (with IP/UDP headers)
-    that is at most ~1.2x, one packet per packet.
+    `TestNatResponse { port }` only, never a `ConfigUpdate`: at most 7 bytes of
+    payload for the client's 3-byte request. On the wire (with IP/UDP headers)
+    that is at most ~1.15x, one packet per packet.
   * It is rate-limited per source IP (IPv6: per /64) with a token bucket, and
     globally. When the limiter table is full, requests are dropped (fail
     closed).
@@ -328,7 +329,7 @@ be abused to make a peer send packets to a third host:
 |---|---|
 | Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route |
 | ICE per route | 128 candidates per direction |
-| ICE frames per connection | 256; a connection with 16 unmatched candidates is closed |
+| ICE frames per connection | 256; a connection with more than 16 unmatched candidates is closed |
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
@@ -354,7 +355,7 @@ be abused to make a peer send packets to a third host:
 * **ICE injection**: a candidate is only forwarded if its `session_key`
   matches the DTLS fingerprint in the route's offer. A third party that knows
   A's address cannot inject candidates without it. The DTLS fingerprint
-  binding in the clients (common.rs:2290) still protects against a
+  binding in the clients (`dtls_fingerprint_bound`, common.rs:2296) still protects against a
   man-in-the-middle.
 * **Sink lifetime**: a WebRTC route keeps A's sink at most until the route
   expires or A disconnects. Writes to a kept sink time out after 3 s.
