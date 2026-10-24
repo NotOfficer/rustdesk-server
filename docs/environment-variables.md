@@ -49,6 +49,7 @@ in the inherited process environment.
 | `DB_URL` 🅴 | *(none)* | `./db_v2.sqlite3` | Path/URL of the SQLite database file. See [Database](#database). |
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
 | `MAX_PUNCH_REQUESTS` 🅴 | *(none)* | `100000` | Number of punch-request records kept in memory for the `punch-requests` [console](#runtime-console) command; the oldest is dropped when full. `0` disables recording. |
+| `SECURE_TCP` | `--secure-tcp` | `Y` | Offers the client key exchange (`KeyExchange`, versions 0 and 1) on every TCP connection to `PORT`, not on the NAT test or WebSocket ports. Needed by WebRTC and by signed-in clients. `N` restores the old behavior. See [modern connection types](modern-transports.md). |
 
 🅴 = set through the inherited process environment.
 

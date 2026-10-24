@@ -1,4 +1,5 @@
 use crate::common::*;
+use crate::key_exchange;
 use crate::peer::*;
 use hbb_common::{
     allow_err, bail,
@@ -16,7 +17,7 @@ use hbb_common::{
         register_pk_response::Result::{TOO_FREQUENT, UUID_MISMATCH},
         *,
     },
-    tcp::FramedStream,
+    tcp::{Encrypt, FramedStream},
     timeout,
     tokio::{
         self,
@@ -48,10 +49,13 @@ enum Data {
 }
 
 const REG_TIMEOUT: i64 = 30_000;
+// largest rendezvous frame accepted on TCP; a PunchHoleRequest with an offer is a few KiB
+const MAX_TCP_FRAME: usize = 64 * 1024;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
-    TcpStream(TcpStreamSink),
+    // the key once the connection's key exchange is done
+    TcpStream(TcpStreamSink, Option<Encrypt>),
     Ws(WsSink),
 }
 type Sender = mpsc::UnboundedSender<Data>;
@@ -60,6 +64,7 @@ static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
+static SECURE_TCP: AtomicBool = AtomicBool::new(true);
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
@@ -196,6 +201,7 @@ impl RendezvousServer {
                 "N"
             }
         );
+        load_switch("SECURE_TCP", &SECURE_TCP);
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
                 listener.local_addr()?
@@ -863,7 +869,11 @@ impl RendezvousServer {
         if let Some(sink) = sink.as_mut() {
             if let Ok(bytes) = msg.write_to_bytes() {
                 match sink {
-                    Sink::TcpStream(s) => {
+                    Sink::TcpStream(s, enc) => {
+                        let bytes = match enc.as_mut() {
+                            Some(enc) => enc.enc(&bytes),
+                            None => bytes,
+                        };
                         allow_err!(s.send(Bytes::from(bytes)).await);
                     }
                     Sink::Ws(ws) => {
@@ -1226,9 +1236,58 @@ impl RendezvousServer {
                 }
             }
         } else {
-            let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
-            sink = Some(Sink::TcpStream(a));
-            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
+            let mut codec = BytesCodec::new();
+            codec.set_max_packet_length(MAX_TCP_FRAME);
+            let (a, mut b) = Framed::new(stream, codec).split();
+            sink = Some(Sink::TcpStream(a, None));
+            let mut offer = None;
+            if SECURE_TCP.load(Ordering::SeqCst) {
+                if let Some(sk) = self.inner.sk.as_ref() {
+                    match key_exchange::offer(sk) {
+                        Ok((ex, o)) => {
+                            let mut msg_out = RendezvousMessage::new();
+                            msg_out.set_key_exchange(ex);
+                            Self::send_to_sink(&mut sink, msg_out).await;
+                            offer = Some(o);
+                        }
+                        Err(err) => log::error!("Failed to offer key exchange: {}", err),
+                    }
+                }
+            }
+            let mut dec: Option<Encrypt> = None;
+            while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
+                if let Some(dec) = dec.as_mut() {
+                    if dec.dec(&mut bytes).is_err() {
+                        log::debug!("Tcp connection from {:?} failed to decrypt", addr);
+                        break;
+                    }
+                } else if let Some(offer) = offer.take() {
+                    // only the first frame can answer our offer, anything else stays plaintext
+                    if let Ok(RendezvousMessage {
+                        union: Some(rendezvous_message::Union::KeyExchange(ex)),
+                        ..
+                    }) = RendezvousMessage::parse_from_bytes(&bytes)
+                    {
+                        match key_exchange::complete(&offer, &ex) {
+                            Ok(enc) => {
+                                if let Some(Sink::TcpStream(_, key)) = sink.as_mut() {
+                                    *key = Some(enc.clone());
+                                }
+                                dec = Some(enc);
+                                log::debug!(
+                                    "Tcp connection from {:?} secured, version {}",
+                                    addr,
+                                    ex.version
+                                );
+                                continue;
+                            }
+                            Err(err) => {
+                                log::debug!("Key exchange with {:?} failed: {}", addr, err);
+                                break;
+                            }
+                        }
+                    }
+                }
                 if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
                     break;
                 }
@@ -1311,6 +1370,18 @@ impl RendezvousServer {
         }
         false
     }
+}
+
+// Feature switches default to on; "N" turns them off.
+fn load_switch(name: &str, switch: &AtomicBool) {
+    if get_arg(name).to_uppercase() == "N" {
+        switch.store(false, Ordering::SeqCst);
+    }
+    log::info!(
+        "{}={}",
+        name,
+        if switch.load(Ordering::SeqCst) { "Y" } else { "N" }
+    );
 }
 
 async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
