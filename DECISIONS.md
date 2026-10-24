@@ -97,10 +97,11 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   would lose WebRTC rather than get an unprotected route.
 - **UDP `PunchHoleSent` source check.** Besides the route, the datagram's
   source IP must match the controlled peer's registered IP (IPv6: same /64,
-  because of privacy addresses). This stops a third party that knows a route
-  from steering the controller's UDP probes to another host. In rare setups
-  (NAT pools without paired addresses) UDP punching then fails; the TCP
-  fallback round is unaffected.
+  because of privacy addresses) for `is_udp`. This stops a third party that
+  knows a route from steering the controller's UDP probes to another host.
+  A mismatch (NAT pools without paired addresses, multi-WAN) still gets a
+  response without `is_udp` (review finding UDP-3), so the WebRTC answer
+  arrives and the controller can relay instead of waiting for retries.
 - **Route capacity exhausted → degrade.** If no route can be opened, the
   request is forwarded like the original server would (no `udp_port`, no
   offer).
@@ -136,3 +137,9 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   mount reuses stale output when another source tree with older file times is
   built (found by the lab, which builds the baseline from `git archive`).
   Only the registry and git caches are kept.
+- **Route table exhaustion.** Routes are capped per controller IP/64 (64)
+  and in total (10,000), and live only as long as the controller's TCP
+  connection. Filling the table therefore needs thousands of open
+  connections from many /64s, the same cost as exhausting the server's
+  connections in general. A full table fails closed: no UDP/WebRTC for new
+  requests, which fall back to TCP/relay.

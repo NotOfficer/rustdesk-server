@@ -197,18 +197,146 @@ async fn forged_hole_sent_without_a_route_sends_nothing() {
 }
 
 #[tokio::test]
-async fn hole_sent_from_another_host_or_id_is_ignored() {
+async fn hole_sent_for_another_id_is_ignored() {
     let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
-    let stranger = udp_socket("127.0.0.3".parse().unwrap()).await;
-    send_hole_sent(&stranger, &hbbs, &ph.socket_addr, "peer01", None).await;
     let punch = udp_socket(PEER_IP).await;
     send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer02", None).await;
     assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
-    assert!(drain(&stranger, 100).await.is_empty());
     // the real one still works
     send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", None).await;
     let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.is_udp);
     assert_eq!(demangle(&res.socket_addr), punch.local_addr().unwrap());
+}
+
+// From another host than the peer registered from (NAT pool, multi-WAN, or
+// forged) the controller still gets the response, but not as a UDP address.
+#[tokio::test]
+async fn hole_sent_from_another_host_is_not_punched() {
+    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let stranger = udp_socket("127.0.0.3".parse().unwrap()).await;
+    send_hole_sent(&stranger, &hbbs, &ph.socket_addr, "peer01", None).await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(!res.is_udp);
+    assert!(!res.socket_addr.is_empty());
+    assert!(drain(&stranger, 100).await.is_empty());
+    // the route is used up
+    let punch = udp_socket(PEER_IP).await;
+    send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", None).await;
+    assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
+}
+
+#[tokio::test]
+async fn wrong_licence_key_opens_no_udp_route() {
+    let (pk, sk) = sign::gen_keypair();
+    let mut secret = sk.0.to_vec();
+    secret.truncate(64);
+    let hbbs = Hbbs::start(&[], &["-k", &base64::encode(&secret)]).await;
+    let key = base64::encode(pk);
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    let mut req = punch_hole_request("peer01", "wrong-key");
+    req.udp_port = 40000;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert_eq!(
+        res.failure.enum_value(),
+        Ok(punch_hole_response::Failure::LICENSE_MISMATCH)
+    );
+    assert!(peer.expect(500, pick_punch_hole).await.is_none());
+    // a forged PunchHoleSent for that connection finds no route
+    let forger = udp_socket(PEER_IP).await;
+    send_hole_sent(&forger, &hbbs, &mangle(ctl.local_addr()), "peer01", None).await;
+    assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
+    // the right key works
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
+    let mut req = punch_hole_request("peer01", &key);
+    req.udp_port = 40000;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    assert_eq!(peer.expect(3000, pick_punch_hole).await.unwrap().udp_port, 40000);
+}
+
+// A 1.4.0 controlled side knows no udp_port and answers over TCP as before.
+#[tokio::test]
+async fn old_controlled_side_answers_over_tcp() {
+    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
+    let reply_addr = reply.local_addr();
+    reply
+        .send(&msg(|m| {
+            m.set_punch_hole_sent(PunchHoleSent {
+                socket_addr: ph.socket_addr.clone(),
+                id: "peer01".to_owned(),
+                nat_type: NatType::ASYMMETRIC.into(),
+                version: "1.4.0".to_owned(),
+                ..Default::default()
+            })
+        }))
+        .await;
+    drop(reply);
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(!res.is_udp);
+    assert_eq!(demangle(&res.socket_addr), reply_addr);
+}
+
+// The usual 1.5.0 round with everything on: UDP, IPv6 and WebRTC together; the
+// controlled side puts its answer and IPv6 address into the UDP PunchHoleSent.
+#[tokio::test]
+async fn udp_ipv6_and_webrtc_in_one_round() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let fp = "sha-256 11:22:33";
+    let endpoint = |kind: &str| {
+        let sdp = format!("v=0\r\ns=-\r\nt=0 0\r\na=fingerprint:{}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", fp);
+        let json = serde_json::json!({"type": kind, "sdp": sdp, "ice_policy": "all"});
+        format!("webrtc://{}", base64::encode(json.to_string()))
+    };
+    let a_v6 = mangle("[2001:db8::a]:40001".parse().unwrap());
+    let b_v6 = mangle("[2001:db8::b]:40002".parse().unwrap());
+    let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
+    let mut req = punch_hole_request("peer01", &hbbs.key);
+    req.udp_port = 40000;
+    req.socket_addr_v6 = a_v6.clone();
+    req.webrtc_sdp_offer = endpoint("offer");
+    ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert_eq!(ph.udp_port, 40000);
+    assert_eq!(ph.socket_addr_v6, a_v6);
+    assert_eq!(ph.webrtc_sdp_offer, endpoint("offer"));
+    let punch = udp_socket(PEER_IP).await;
+    let phs = PunchHoleSent {
+        socket_addr: ph.socket_addr.clone(),
+        id: "peer01".to_owned(),
+        nat_type: NatType::ASYMMETRIC.into(),
+        version: "1.5.0".to_owned(),
+        socket_addr_v6: b_v6.clone(),
+        webrtc_sdp_answer: endpoint("answer"),
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        let bytes = msg(|m| m.set_punch_hole_sent(phs.clone())).write_to_bytes().unwrap();
+        punch.send_to(&bytes, hbbs.udp_addr()).await.unwrap();
+    }
+    let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
+    assert!(res.is_udp);
+    assert_eq!(demangle(&res.socket_addr), punch.local_addr().unwrap());
+    assert_eq!(res.socket_addr_v6, b_v6);
+    assert_eq!(res.webrtc_sdp_answer, endpoint("answer"));
+    // the controller's connection stays for ICE
+    let mut c = IceCandidate {
+        id: "peer01".to_owned(),
+        session_key: fp.to_owned(),
+        candidate: "c1".to_owned(),
+        ..Default::default()
+    };
+    ctl.send(&msg(|m| m.set_ice_candidate(c.clone()))).await;
+    assert_eq!(peer.expect(3000, pick_ice).await.unwrap().candidate, "c1");
+    let mut ice_conn = Tcp::connect(&hbbs, PEER_IP, Kx::V1).await;
+    c.id.clear();
+    c.socket_addr = ph.socket_addr.clone();
+    c.candidate = "c2".to_owned();
+    ice_conn.send(&msg(|m| m.set_ice_candidate(c))).await;
+    assert_eq!(ctl.expect(3000, pick_ice).await.unwrap().candidate, "c2");
 }
 
 #[tokio::test]

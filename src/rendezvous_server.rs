@@ -776,11 +776,19 @@ impl RendezvousServer {
         let Some(addr_a) = punch::decode_addr(&phs.socket_addr) else {
             return;
         };
-        if self.routes.claim_udp(addr_a, &phs.id, addr).is_none() {
+        let Some(from_peer) = self.routes.claim_udp(addr_a, &phs.id, addr) else {
             log::debug!("Ignored UDP punch hole sent from {:?}", addr);
             return;
-        }
-        log::debug!("UDP punch hole response to {:?} from {:?}", &addr_a, &addr);
+        };
+        // From another host than the peer registered from (NAT pools, multi-WAN,
+        // or forged): still answer, so the answer and the relay fallback work, but
+        // the controller must not punch that address.
+        log::debug!(
+            "UDP punch hole response to {:?} from {:?}, is_udp: {}",
+            &addr_a,
+            &addr,
+            from_peer
+        );
         let mut msg_out = RendezvousMessage::new();
         let webrtc_sdp_answer = if self.answer_allowed(&phs.webrtc_sdp_answer, addr_a, &phs.id) {
             phs.webrtc_sdp_answer
@@ -791,7 +799,7 @@ impl RendezvousServer {
             socket_addr: AddrMangle::encode(addr).into(),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server,
-            is_udp: true,
+            is_udp: from_peer,
             socket_addr_v6: forward_v6(&phs.socket_addr_v6),
             webrtc_sdp_answer,
             ..Default::default()

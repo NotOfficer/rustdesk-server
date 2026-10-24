@@ -25,6 +25,8 @@ const MAX_ROUTES_PER_IP: usize = 64;
 const UDP_ROUTE_TTL: Duration = Duration::from_secs(30);
 const WEBRTC_ROUTE_TTL: Duration = Duration::from_secs(60);
 const MAX_ROUTE_LIFETIME: Duration = Duration::from_secs(120);
+// a full table looks for expired routes at most this often
+const ROUTE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // Re-sent requests (the controller retries after 3 s and 9 s) keep the offer
 // this often while nothing came back. A controlled side that cannot complete
 // the key exchange drops its reply silently; without the offer it answers
@@ -75,13 +77,74 @@ pub(crate) struct Grant {
 }
 
 #[derive(Default)]
+struct RouteTable {
+    map: HashMap<SocketAddr, Route>,
+    // routes per controller source (IPv4 address or IPv6 /64)
+    per_source: HashMap<IpAddr, usize>,
+    last_sweep: Option<Instant>,
+}
+
+impl RouteTable {
+    fn get(&self, ctl: &SocketAddr) -> Option<&Route> {
+        self.map.get(ctl)
+    }
+
+    fn get_mut(&mut self, ctl: &SocketAddr) -> Option<&mut Route> {
+        self.map.get_mut(ctl)
+    }
+
+    fn insert(&mut self, ctl: SocketAddr, route: Route) {
+        if self.map.insert(ctl, route).is_none() {
+            *self.per_source.entry(source_key(ctl.ip())).or_default() += 1;
+        }
+    }
+
+    fn remove(&mut self, ctl: &SocketAddr) {
+        if self.map.remove(ctl).is_some() {
+            let source = source_key(ctl.ip());
+            if let Some(n) = self.per_source.get_mut(&source) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.per_source.remove(&source);
+                }
+            }
+        }
+    }
+
+    fn full(&self, ctl: &SocketAddr) -> bool {
+        self.map.len() >= MAX_ROUTES
+            || self
+                .per_source
+                .get(&source_key(ctl.ip()))
+                .map(|n| *n >= MAX_ROUTES_PER_IP)
+                .unwrap_or(false)
+    }
+
+    // Drops expired routes, at most once per interval, so a full table does not
+    // cost a scan per request.
+    fn sweep(&mut self, now: Instant) {
+        if let Some(last) = self.last_sweep {
+            if now.saturating_duration_since(last) < ROUTE_SWEEP_INTERVAL {
+                return;
+            }
+        }
+        self.last_sweep = Some(now);
+        self.map.retain(|_, r| r.alive(now));
+        self.per_source.clear();
+        for ctl in self.map.keys() {
+            *self.per_source.entry(source_key(ctl.ip())).or_default() += 1;
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct PunchRoutes {
-    map: Mutex<HashMap<SocketAddr, Route>>,
+    table: Mutex<RouteTable>,
 }
 
 impl PunchRoutes {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SocketAddr, Route>> {
-        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, RouteTable> {
+        self.table.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Opens or refreshes the route of controller connection `ctl` to `peer_id`.
@@ -112,18 +175,13 @@ impl PunchRoutes {
         if map.get(&ctl).map(|r| !r.alive(now)).unwrap_or(false) {
             map.remove(&ctl);
         }
-        if !map.contains_key(&ctl) {
+        if map.get(&ctl).is_none() {
             if !udp && session_key.is_none() {
                 return grant;
             }
-            let full = |map: &HashMap<SocketAddr, Route>| {
-                map.len() >= MAX_ROUTES
-                    || map.keys().filter(|k| same_host(k.ip(), ctl.ip())).count()
-                        >= MAX_ROUTES_PER_IP
-            };
-            if full(&map) {
-                map.retain(|_, r| r.alive(now));
-                if full(&map) {
+            if map.full(&ctl) {
+                map.sweep(now);
+                if map.full(&ctl) {
                     return grant;
                 }
             }
@@ -241,8 +299,9 @@ impl PunchRoutes {
         true
     }
 
-    /// Accepts the first UDP PunchHoleSent of the route of `ctl`, if it comes
-    /// from `peer_id`'s address. Returns whether the route also carries WebRTC.
+    /// Accepts the first UDP PunchHoleSent from `peer_id` for the route of
+    /// `ctl`. Returns whether it came from the peer's registered host: only
+    /// then may the controller punch its source address.
     pub(crate) fn claim_udp(&self, ctl: SocketAddr, peer_id: &str, src: SocketAddr) -> Option<bool> {
         self.claim_udp_at(Instant::now(), ctl, peer_id, src)
     }
@@ -256,15 +315,11 @@ impl PunchRoutes {
     ) -> Option<bool> {
         let mut map = self.lock();
         let r = map.get_mut(&try_into_v4(ctl))?;
-        if !r.alive(now)
-            || r.udp != Some(false)
-            || r.peer_id != peer_id
-            || !same_host(r.peer_ip, src.ip())
-        {
+        if !r.alive(now) || r.udp != Some(false) || r.peer_id != peer_id {
             return None;
         }
         r.udp = Some(true);
-        Some(r.webrtc.is_some())
+        Some(same_host(r.peer_ip, src.ip()))
     }
 
     /// Notes that a response from the peer reached controller connection `ctl`.
@@ -280,7 +335,7 @@ impl PunchRoutes {
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().map.len()
     }
 }
 
@@ -315,7 +370,13 @@ pub(crate) struct RateLimiter {
     burst: f64,
     rate: f64,
     global: Option<(f64, f64)>,
-    inner: Mutex<(Bucket, HashMap<IpAddr, Bucket>)>,
+    inner: Mutex<LimiterState>,
+}
+
+struct LimiterState {
+    global: Bucket,
+    sources: HashMap<IpAddr, Bucket>,
+    last_sweep: Option<Instant>,
 }
 
 impl RateLimiter {
@@ -325,7 +386,11 @@ impl RateLimiter {
             burst,
             rate,
             global,
-            inner: Mutex::new((Bucket::full(Instant::now(), global_burst), HashMap::new())),
+            inner: Mutex::new(LimiterState {
+                global: Bucket::full(Instant::now(), global_burst),
+                sources: HashMap::new(),
+                last_sweep: None,
+            }),
         }
     }
 
@@ -350,19 +415,24 @@ impl RateLimiter {
     }
 
     fn allow_at(&self, now: Instant, ip: IpAddr) -> bool {
-        let source = match try_into_v4(SocketAddr::new(ip, 0)).ip() {
-            IpAddr::V6(v6) => {
-                let s = v6.segments();
-                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
-            }
-            ip => ip,
-        };
+        let source = source_key(ip);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let (global, sources) = &mut *guard;
+        let LimiterState {
+            global,
+            sources,
+            last_sweep,
+        } = &mut *guard;
         if !sources.contains_key(&source) && sources.len() >= LIMITER_SOURCES {
-            // a bucket that has refilled is the same as none
+            // a bucket that has refilled is the same as none; sweep at most once
+            // per refill time, so a full table costs no scan per packet
             let refill = Duration::from_secs_f64(self.burst / self.rate);
-            sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
+            if last_sweep
+                .map(|t| now.saturating_duration_since(t) >= refill)
+                .unwrap_or(true)
+            {
+                *last_sweep = Some(now);
+                sources.retain(|_, b| now.saturating_duration_since(b.last) < refill);
+            }
             if sources.len() >= LIMITER_SOURCES {
                 return false;
             }
@@ -411,18 +481,21 @@ pub(crate) fn replyable(addr: SocketAddr) -> bool {
         && !matches!(ip, IpAddr::V4(v4) if v4.is_broadcast())
 }
 
-/// Whether two addresses belong to the same host: equal IPv4, or the same IPv6 /64
-/// (privacy extensions give each socket another address in the prefix).
-pub(crate) fn same_host(a: IpAddr, b: IpAddr) -> bool {
-    let norm = |ip: IpAddr| match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+/// The host an address belongs to: the IPv4 address, or the IPv6 /64 (privacy
+/// extensions give each socket another address in the prefix).
+pub(crate) fn source_key(ip: IpAddr) -> IpAddr {
+    match try_into_v4(SocketAddr::new(ip, 0)).ip() {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
         ip => ip,
-    };
-    match (norm(a), norm(b)) {
-        (IpAddr::V4(a), IpAddr::V4(b)) => a == b,
-        (IpAddr::V6(a), IpAddr::V6(b)) => a.segments()[..4] == b.segments()[..4],
-        _ => false,
     }
+}
+
+/// Whether two addresses belong to the same host, see `source_key`.
+pub(crate) fn same_host(a: IpAddr, b: IpAddr) -> bool {
+    source_key(a) == source_key(b)
 }
 
 /// AddrMangle::decode without its unchecked arithmetic, for addresses from the
@@ -621,11 +694,14 @@ mod tests {
     fn udp_claim_is_single_and_checks_the_sender() {
         let routes = PunchRoutes::default();
         routes.open(ctl(1), "peer01", peer_ip(), true, None);
-        let other = SocketAddr::new("10.9.9.9".parse().unwrap(), 5000);
-        assert_eq!(routes.claim_udp(ctl(1), "peer01", other), None);
         assert_eq!(routes.claim_udp(ctl(1), "peer02", SocketAddr::new(peer_ip(), 1)), None);
-        assert_eq!(routes.claim_udp(ctl(1), "peer01", SocketAddr::new(peer_ip(), 5000)), Some(false));
+        assert_eq!(routes.claim_udp(ctl(1), "peer01", SocketAddr::new(peer_ip(), 5000)), Some(true));
         assert_eq!(routes.claim_udp(ctl(1), "peer01", SocketAddr::new(peer_ip(), 5000)), None);
+        // from another host it is claimed too, but not as the peer's address
+        routes.open(ctl(3), "peer01", peer_ip(), true, None);
+        let other = SocketAddr::new("10.9.9.9".parse().unwrap(), 5000);
+        assert_eq!(routes.claim_udp(ctl(3), "peer01", other), Some(false));
+        assert_eq!(routes.claim_udp(ctl(3), "peer01", SocketAddr::new(peer_ip(), 5000)), None);
         // no UDP granted, no claim
         routes.open(ctl(2), "peer01", peer_ip(), false, Some(FP.to_owned()));
         assert_eq!(routes.claim_udp(ctl(2), "peer01", SocketAddr::new(peer_ip(), 1)), None);
@@ -670,11 +746,15 @@ mod tests {
         for i in 0..LIMITER_SOURCES as u32 {
             limiter.allow_at(t0, IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)));
         }
-        let len = |l: &RateLimiter| l.inner.lock().unwrap().1.len();
+        let len = |l: &RateLimiter| l.inner.lock().unwrap().sources.len();
         assert_eq!(len(&limiter), LIMITER_SOURCES);
         // full: a new source is refused until old buckets have refilled
         assert!(!limiter.allow_at(t0, "1.1.1.1".parse().unwrap()));
         assert_eq!(len(&limiter), LIMITER_SOURCES);
+        // and the next sweep waits for the refill time
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap()));
+        assert_eq!(limiter.inner.lock().unwrap().last_sweep, Some(t0));
         assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap()));
         assert_eq!(len(&limiter), 1);
     }
@@ -786,6 +866,9 @@ mod tests {
         assert_eq!(routes.len(), MAX_ROUTES);
         let late = SocketAddr::new("10.2.0.1".parse().unwrap(), 1);
         assert!(!routes.open(late, "peer01", peer_ip(), true, None).udp);
+        // removing a route frees its slot and its source's count
+        routes.remove(ctl(0));
+        assert!(routes.open(ctl(9999), "peer01", peer_ip(), true, None).udp);
         // expired routes make room again
         let later = Instant::now() + MAX_ROUTE_LIFETIME;
         assert!(routes.open_at(later, late, "peer01", peer_ip(), true, None).udp);

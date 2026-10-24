@@ -250,7 +250,7 @@ WebRTC route, the sink is still consumed by the first response, as before.
 | `TestNatRequest` | UDP | `TestNatResponse { port }` without `ConfigUpdate`, rate-limited (`UDP_PUNCH`) |
 | `PunchHoleRequest` | TCP | forward `udp_port`, `socket_addr_v6`, `webrtc_sdp_offer` (+`force_relay` with an offer) in `PunchHole`; v6 also in `FetchLocalAddr`; open a punch route. No `udp_port` or v6 when the controller set `force_relay`; v6 only from 1.5.0 controllers |
 | `PunchHoleSent` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` if it belongs to A's WebRTC route |
-| `PunchHoleSent` | UDP | if it matches an open UDP route: `PunchHoleResponse { socket_addr = observed UDP source, is_udp }` to A over TCP; otherwise ignored |
+| `PunchHoleSent` | UDP | if it matches an open UDP route: `PunchHoleResponse { socket_addr = observed UDP source, is_udp }` to A over TCP (`is_udp` only if it came from B's registered host); otherwise ignored |
 | `LocalAddr` | TCP | forward `socket_addr_v6` |
 | `RelayResponse` | TCP | forward `socket_addr_v6`; forward `webrtc_sdp_answer` only if it belongs to A's WebRTC route |
 | `IceCandidate` from A | TCP (A's punch connection) | forward to B's registered UDP address if it matches A's route |
@@ -289,12 +289,14 @@ send more, or anything to a third address.
     created by a verified TCP `PunchHoleRequest` that asked for UDP;
   * the route's target id equals `PunchHoleSent.id`;
   * the route is not expired and its UDP answer has not been used (B sends 3
-    copies; only the first counts);
-  * the datagram's source IP matches B's registered IP (IPv4: equal; IPv6:
-    same /64).
+    copies; only the first counts).
 
   Then hbbs sends one `PunchHoleResponse` to A **over A's existing TCP
-  connection**. Anything else is dropped silently.
+  connection**. Anything else is dropped silently. `is_udp` is only set if
+  the datagram's source IP matches B's registered IP (IPv4: equal; IPv6:
+  same /64); otherwise A gets the response (with the WebRTC answer, and a
+  relay fallback) but does not punch that address over UDP. This covers NAT
+  pools and multi-WAN routers as well as a forged source.
 * UDP `PunchHoleRequest`, `LocalAddr` and `IceCandidate` stay ignored.
 * Messages hbbs sends to B over UDP (`PunchHole`, `IceCandidate`) go only to
   B's registered address. They are triggered by A's TCP connection, which
@@ -330,7 +332,8 @@ be abused to make a peer send packets to a third host:
 | SDP offer/answer | 4096 bytes, otherwise dropped |
 | ICE candidate | 2048 bytes; session key 256 bytes |
 | `socket_addr_v6` | 18 bytes (the mangled IPv6 form), otherwise dropped |
-| UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: burst 4000, 2000/s; table 65,536 entries |
+| UDP `TestNatRequest` limiter | per IP/64: burst 20, 10/s; global: burst 4000, 2000/s; table 65,536 entries, a full table is swept at most every 2 s |
+| IPv6 forwards | per controller IP/64: burst 60, 1/s; table 65,536 entries |
 | TCP frames on 21116 | 64 KiB per frame |
 | Key exchange | per-connection only |
 
@@ -365,7 +368,7 @@ be abused to make a peer send packets to a third host:
 | Client | Effect |
 |---|---|
 | 1.5.0 | all four features work when the controller enables them |
-| 1.4.9 | no WebRTC, no v1 exchange, no IPv6 as controller (see 1.5); as controlled side IPv6 works. UDP works: 1.4.9 takes `udp_port` also from STUN, so it already sent `udp_port > 0` to the original hbbs, which dropped it; now it is forwarded. A 1.4.9 controller with UDP explicitly on therefore tries UDP punching; its parallel TCP fallback round is unchanged and returns first if UDP fails. |
+| 1.4.9 | no WebRTC, no v1 exchange, no IPv6 as controller (see 1.5); as controlled side IPv6 works. UDP: 1.4.9 takes `udp_port` from hbbs' UDP answer or from a STUN probe on a different socket, whichever comes first, so it already sent `udp_port > 0` to the original hbbs, which dropped it. Now it is forwarded. If the port came from STUN, the controlled side punches the wrong port and UDP fails (1.5.0 removed that race for this reason). Either way a 1.4.9 controller with UDP explicitly on keeps its parallel TCP fallback round, which is unchanged and wins if UDP fails. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
 | all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |
