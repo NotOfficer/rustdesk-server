@@ -86,3 +86,12 @@ key files unchanged.
 | FINAL-2-2 | One licence holder with an IPv6 /48 can fill the global route table (157 /64s × 64 routes) and the IPv6-forward limiter table, so other users get no UDP/WebRTC/IPv6. Proven with a unit test. | Valid (minor) | `9c6f140`: a full route table evicts the oldest route of the source with clearly the most routes; the IPv6 forward limiter (licensed, non-spoofable sources) lets unknown sources pass when full. Unit test `a_full_table_takes_from_the_heaviest_source`. |
 | FINAL-2-3 | 500 ms is not enough on high-latency lossy links: the first RTO after the handshake is about 3 × RTT, so for RTT above ~250 ms the offer can still win and reset the reply; the doc's timing argument was wrong. | Valid (minor) | `9c6f140`: delay = 4 × kernel-measured handshake RTT + 100 ms (500 ms to 3 s, `TCP_INFO`), docs corrected. Unit tests `kx_offer_delay_follows_the_round_trip`, `tcp_rtt_reads_the_handshake`. |
 | FINAL-2-4 | The lab never runs a real 1.4.0 client, although 1.4.0 has its own code paths. | Valid (test gap) | `a9745e1`: lab cases `client-1.4.0`, `baseline-client-1.4.0`, `mixed-1.4.0-controller`, `mixed-1.4.0-controlled` (signed-in clients need an API server and are covered by the integration tests only). |
+
+### Round 3 (`873230e..d594b75`)
+
+No critical or major findings.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-3-1 | `udp_port` was forwarded from 1.4.1 controllers. 1.4.1 has a single round (no parallel TCP fallback, verified: `_start_inner` appears only from 1.4.2), its UDP attempt (`punch_udp`, 20 s) ignores the connect timeout, and the controlled side does no TCP punch once it has a `udp_port`: a working TCP punch could turn into a relay after ~20 s. | Valid (minor) | `c163c9e`: `udp_port` (like IPv6) only from controllers 1.5.0 or newer; all 1.4.x controllers get the original behavior. Tests `udp_only_from_controllers_since_1_5_0` and the differential test `new_fields_from_1_4_controllers_match_the_original`. |
+| FINAL-3-2 | A failed UDP `TestNatResponse` send stays queued in the framed socket (tokio-util `UdpFramed`) and makes every later UDP send fail until the socket is recreated; a spoofed source the kernel refuses could keep peer sends broken. Proven with a unit test. | Valid (minor) | `c163c9e`: the reply is written straight to the socket (`try_send_to`), outside the queue. Unit test `a_failed_udp_reply_does_not_block_the_socket` (with the framed send as control). The same pre-existing behavior of the unchanged `Data::Msg` path is noted in DECISIONS.md and REPORT.md. |
