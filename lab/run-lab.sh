@@ -377,6 +377,7 @@ run_case() {
     return
   fi
   ensure_client "$ctl_ver"; ensure_client "$cted_ver"
+  t0=$SECONDS   # image downloads and builds do not count as case time
   [ "$topo" != flat ] && ensure_router
 
   {
