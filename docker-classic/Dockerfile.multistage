@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Multi-stage variant of docker-classic/Dockerfile: builds static musl
+# binaries from the source tree, so no prebuilt binaries are needed.
+#   docker build -f docker-classic/Dockerfile.multistage -t rustdesk-server-modern:dev .
+FROM rust:1.93-alpine AS builder
+RUN apk add --no-cache musl-dev make perl pkgconf openssl-dev openssl-libs-static
+ENV OPENSSL_STATIC=1
+WORKDIR /src
+COPY . .
+ARG CARGO_BUILD_JOBS=8
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} cargo build --release --locked \
+        --bin hbbs --bin hbbr --bin rustdesk-utils \
+    && mkdir -p /out \
+    && cp target/release/hbbs target/release/hbbr target/release/rustdesk-utils /out/
+
+FROM scratch
+COPY --from=builder /out/hbbs /usr/bin/hbbs
+COPY --from=builder /out/hbbr /usr/bin/hbbr
+COPY --from=builder /out/rustdesk-utils /usr/bin/rustdesk-utils
+WORKDIR /root
+ENV HOME=/root
