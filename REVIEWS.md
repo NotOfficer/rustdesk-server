@@ -56,3 +56,19 @@ goes back over UDP, and the licence key gates every route.
 | UDP-4 | Docs claim "UDP works" for 1.4.9, but 1.4.1-1.4.9 may send a `udp_port` taken from STUN on another socket. | Valid (docs) | `da09859`: docs corrected; the unchanged fallback round covers it. |
 | UDP-5 | The `.dockerignore` repair is hidden in the UDP commit, so reverting that commit would break the Docker build again. | Valid (hygiene) | Not rewritten: the branch history stays; the commit message names the change. Switching UDP off is done with `UDP_PUNCH=N`, not a revert. |
 | UDP-6 | Test gaps: UDP + WebRTC in one round, licence key with `udp_port`, a 1.4.0 controlled side answering over TCP, limiter cost. | Valid (minor) | `da09859`: tests `udp_ipv6_and_webrtc_in_one_round`, `wrong_licence_key_opens_no_udp_route`, `old_controlled_side_answers_over_tcp`, sweep unit test. |
+
+## Final review loop
+
+### Round 1 (`873230e..1a5c571`)
+
+No critical or major findings. Confirmed: key exchange v0/v1 against
+1.5.0/1.4.9/1.4.0, session key derivation, field numbers, older clients skip
+the extra `KeyExchange`, licence key on every new path, bounds, logging, no
+`unwrap()` on network data.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-1-1 | The 100 ms offer delay is shorter than a retransmission of the controlled side's lost first segment (200 ms minimum RTO), so under packet loss the offer can still meet the closed socket and the reply is reset away. | Valid (minor) | `79080f9`: delay raised to 500 ms (documented cost: 500 ms for key-exchanging connections). |
+| FINAL-1-2 | About 2000 spoofed `TestNatRequest`s per second keep the global budget empty, so genuine controllers get no answer and lose UDP punching (fail closed). Proven with 15,000 loopback sources. | Valid (minor) | `79080f9`: sources with an open TCP connection to hbbs (address proven) skip the global budget; global limit configurable (`UDP_TEST_NAT_LIMIT`). Test `connected_controllers_keep_their_nat_test` (fails without the fix). |
+| FINAL-1-3 | The switches only turn off on `N`; `false`, `0`, `no`, `off` silently leave a feature on. | Valid (minor) | `79080f9`: those values turn it off, other values log a warning. Tests `switch_values_*`. |
+| FINAL-1-4 | Docs claim clients that skip the exchange "send at once", but 1.5.0 controllers wait up to ~400 ms for their UDP NAT test and may see the offer first; no test covered that order. | Valid (docs/test) | `79080f9`: docs corrected, test `offer_after_half_a_second_then_plaintext`. |
