@@ -50,6 +50,7 @@ in the inherited process environment.
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
 | `MAX_PUNCH_REQUESTS` 🅴 | *(none)* | `100000` | Number of punch-request records kept in memory for the `punch-requests` [console](#runtime-console) command; the oldest is dropped when full. `0` disables recording. |
 | `SECURE_TCP` | `--secure-tcp` | `Y` | Offers the client key exchange (`KeyExchange`, versions 0 and 1) on every TCP connection to `PORT`, not on the NAT test or WebSocket ports. Needed by WebRTC and by signed-in clients. `N` restores the old behavior. See [modern connection types](modern-transports.md). |
+| `IPV6_PUNCH` | `--ipv6-punch` | `Y` | Passes the peers' IPv6 addresses (`socket_addr_v6`) between them, so clients with public IPv6 can connect directly over IPv6. `N` drops them. Never applied to WebSocket clients or when a relay is forced. |
 
 🅴 = set through the inherited process environment.
 

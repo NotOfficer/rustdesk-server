@@ -65,6 +65,9 @@ type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 static SECURE_TCP: AtomicBool = AtomicBool::new(true);
+static IPV6_PUNCH: AtomicBool = AtomicBool::new(true);
+// AddrMangle of an IPv6 socket address: 16 bytes address, 2 bytes port
+const MANGLED_V6_LEN: usize = 18;
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
@@ -202,6 +205,7 @@ impl RendezvousServer {
             }
         );
         load_switch("SECURE_TCP", &SECURE_TCP);
+        load_switch("IPV6_PUNCH", &IPV6_PUNCH);
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
                 listener.local_addr()?
@@ -561,6 +565,11 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
                     let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
+                    rr.socket_addr_v6 = if self.relay_forced(addr, addr_b) {
+                        Default::default()
+                    } else {
+                        forward_v6(&rr.socket_addr_v6)
+                    };
                     let id = rr.id();
                     if !id.is_empty() {
                         let pk = self.get_pk(&rr.version, id.to_owned()).await;
@@ -678,6 +687,7 @@ impl RendezvousServer {
             socket_addr: AddrMangle::encode(addr).into(),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
+            socket_addr_v6: forward_v6(&phs.socket_addr_v6),
             ..Default::default()
         };
         if let Ok(t) = phs.nat_type.enum_value() {
@@ -712,6 +722,7 @@ impl RendezvousServer {
             socket_addr: la.local_addr.clone(),
             pk: self.get_pk(&la.version, la.id).await,
             relay_server: la.relay_server,
+            socket_addr_v6: forward_v6(&la.socket_addr_v6),
             ..Default::default()
         };
         p.set_is_local(true);
@@ -774,7 +785,8 @@ impl RendezvousServer {
             let peer_is_lan = self.is_lan(peer_addr);
             let is_lan = self.is_lan(addr);
             let mut relay_server = self.get_relay_server(addr.ip(), peer_addr.ip());
-            if ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan) {
+            let relay_forced = ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan);
+            if relay_forced {
                 if peer_is_lan {
                     // https://github.com/rustdesk/rustdesk-server/issues/24
                     relay_server = self.inner.local_ip.clone()
@@ -790,6 +802,12 @@ impl RendezvousServer {
                     }
                 });
             let socket_addr = AddrMangle::encode(addr).into();
+            // IPv6 would bypass a forced relay; WebSocket clients keep the old behavior
+            let socket_addr_v6 = if ws || relay_forced {
+                Default::default()
+            } else {
+                forward_v6(&ph.socket_addr_v6)
+            };
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
@@ -800,6 +818,7 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
+                    socket_addr_v6,
                     ..Default::default()
                 });
             } else {
@@ -813,6 +832,7 @@ impl RendezvousServer {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
+                    socket_addr_v6,
                     ..Default::default()
                 });
             }
@@ -1353,6 +1373,11 @@ impl RendezvousServer {
         Ok((key, out_sk))
     }
 
+    // the same rule handle_punch_hole_request uses to force a relay
+    fn relay_forced(&self, a: SocketAddr, b: SocketAddr) -> bool {
+        ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (self.is_lan(a) ^ self.is_lan(b))
+    }
+
     #[inline]
     fn is_lan(&self, addr: SocketAddr) -> bool {
         if let Some(network) = &self.inner.mask {
@@ -1369,6 +1394,15 @@ impl RendezvousServer {
             }
         }
         false
+    }
+}
+
+// Only well-formed IPv6 addresses are passed on, and only while IPv6 punching is on.
+fn forward_v6(addr: &Bytes) -> Bytes {
+    if IPV6_PUNCH.load(Ordering::SeqCst) && addr.len() == MANGLED_V6_LEN {
+        addr.clone()
+    } else {
+        Bytes::new()
     }
 }
 
