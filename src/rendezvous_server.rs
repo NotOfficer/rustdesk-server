@@ -614,7 +614,7 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
-                    let addr_b = AddrMangle::decode(&rr.socket_addr);
+                    let addr_b = decode_or_unspecified(&rr.socket_addr);
                     rr.socket_addr = Default::default();
                     rr.socket_addr_v6 = if self.relay_forced(addr, addr_b) {
                         Default::default()
@@ -734,7 +734,7 @@ impl RendezvousServer {
         socket: Option<&'a mut FramedSocket>,
     ) -> ResultType<()> {
         // punch hole sent from B, tell A that B is ready to be connected
-        let addr_a = AddrMangle::decode(&phs.socket_addr);
+        let addr_a = decode_or_unspecified(&phs.socket_addr);
         log::debug!(
             "{} punch hole response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
@@ -811,7 +811,7 @@ impl RendezvousServer {
         socket: Option<&'a mut FramedSocket>,
     ) -> ResultType<()> {
         // relay local addrs of B to A
-        let addr_a = AddrMangle::decode(&la.socket_addr);
+        let addr_a = decode_or_unspecified(&la.socket_addr);
         log::debug!(
             "{} local addrs response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
@@ -1035,6 +1035,7 @@ impl RendezvousServer {
     // the answer and the ICE candidates.
     async fn take_tcp_sink(&self, addr: SocketAddr) -> Option<SharedSink> {
         let addr = try_into_v4(addr);
+        self.routes.replied(addr);
         let mut tcp_punch = self.tcp_punch.lock().await;
         if self.routes.keeps_sink(addr) {
             tcp_punch.get(&addr).cloned()
@@ -1648,6 +1649,12 @@ impl RendezvousServer {
         }
         false
     }
+}
+
+// A mangled address from the network; like AddrMangle::decode, an invalid one
+// becomes 0.0.0.0:0, which matches no connection.
+fn decode_or_unspecified(bytes: &[u8]) -> SocketAddr {
+    punch::decode_addr(bytes).unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)))
 }
 
 // Only global IPv6 addresses with a port are passed on, and only while IPv6

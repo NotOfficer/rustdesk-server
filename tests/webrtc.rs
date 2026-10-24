@@ -383,3 +383,93 @@ async fn routes_expire() {
     let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
     assert!(res.webrtc_sdp_answer.is_empty());
 }
+
+// A controlled side without the server's key cannot send its encrypted answer
+// and replies nothing; the controller's re-sent request then goes without the
+// offer, so the peer answers with a plain punch and the controller can relay.
+#[tokio::test]
+async fn unanswered_retries_lose_the_offer() {
+    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    assert!(!ph.webrtc_sdp_offer.is_empty());
+    offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert!(!ph.webrtc_sdp_offer.is_empty());
+    offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert!(ph.webrtc_sdp_offer.is_empty());
+}
+
+#[tokio::test]
+async fn answered_retries_keep_the_offer() {
+    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let _reply = answer_over_tcp(&hbbs, &ph, answer()).await;
+    assert!(ctl.expect(3000, pick_punch_hole_response).await.is_some());
+    for _ in 0..3 {
+        offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
+        let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+        assert_eq!(ph.webrtc_sdp_offer, offer());
+    }
+}
+
+#[tokio::test]
+async fn ipv6_controller_gets_answer_and_ice() {
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let peer = Peer::register(&hbbs, "peer01").await;
+    let loopback6: std::net::IpAddr = "::1".parse().unwrap();
+    let addr = std::net::SocketAddr::new(loopback6, hbbs.port);
+    let mut ctl = Tcp::connect_to(addr, &hbbs.pk, loopback6, Kx::V1).await;
+    assert!(ctl.secured);
+    offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
+    let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
+    assert_eq!(ph.socket_addr.len(), 18);
+    assert_eq!(ph.webrtc_sdp_offer, offer());
+    let _reply = answer_over_tcp(&hbbs, &ph, answer()).await;
+    let mut ice_conn = ice_connection(&hbbs).await;
+    send_ice_from_peer(&mut ice_conn, &ph.socket_addr, FP, CANDIDATE).await;
+    let mut got_answer = false;
+    let mut got_ice = false;
+    while !(got_answer && got_ice) {
+        match ctl.recv(3000).await.expect("controller got too little").union {
+            Some(rendezvous_message::Union::PunchHoleResponse(r)) => {
+                assert_eq!(r.webrtc_sdp_answer, answer());
+                got_answer = true;
+            }
+            Some(rendezvous_message::Union::IceCandidate(c)) => {
+                assert_eq!(c.candidate, CANDIDATE);
+                got_ice = true;
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+    send_ice_from_controller(&mut ctl, "peer01", FP, CANDIDATE).await;
+    assert!(peer.expect(3000, pick_ice).await.is_some());
+}
+
+#[tokio::test]
+async fn websocket_ice_candidate_closes_as_before() {
+    use hbb_common::{
+        futures_util::{SinkExt, StreamExt},
+        protobuf::Message as _,
+    };
+    let hbbs = Hbbs::start(&[], &[]).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", hbbs.ws_addr()))
+        .await
+        .unwrap();
+    let mut c = ice(FP, CANDIDATE);
+    c.id = "peer01".to_owned();
+    ws.send(tungstenite::Message::Binary(
+        msg(|m| m.set_ice_candidate(c)).write_to_bytes().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(tungstenite::Message::Close(_))) => return true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert_eq!(closed, Ok(true));
+}

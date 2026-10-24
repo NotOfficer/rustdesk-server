@@ -188,6 +188,13 @@ hbbs -tcp-> A      IceCandidate { session_key, candidate }                (on A'
   and never reconnects it (client.rs:671).
 * A round carrying an offer never does a TCP punch (client.rs:340); TCP is
   the fallback round's job.
+* Both sides need the server's key in their `key` option: the controlled
+  side sends its answer over TCP only after the key exchange
+  (rendezvous_mediator.rs:1172) and silently gives up if it fails. hbbs
+  therefore forwards the offer only twice per controller connection while
+  nothing comes back; a third (re-sent) request goes without it, the peer
+  answers with a plain punch and the controller can still relay, as with the
+  original server.
 * Same intranet: `FetchLocalAddr` has no offer field. A request carrying an
   offer therefore gets a `PunchHole` (WebRTC uses LAN host candidates). The
   offer-less fallback round still gets `FetchLocalAddr` for the direct LAN
@@ -317,7 +324,7 @@ be abused to make a peer send packets to a third host:
 
 | State | Bound |
 |---|---|
-| Punch routes | 10,000 total, 64 per controller IP, TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation |
+| Punch routes | 10,000 total, 64 per controller IP (IPv6: per /64), TTL 30 s (UDP-only) / 60 s (WebRTC), refreshed by re-sent offers but never beyond 120 s after creation; after that a new request opens a new route |
 | ICE per route | 128 candidates per direction |
 | ICE frames per connection | 256; a connection with 16 unmatched candidates is closed |
 | SDP offer/answer | 4096 bytes, otherwise dropped |

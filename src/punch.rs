@@ -25,6 +25,11 @@ const MAX_ROUTES_PER_IP: usize = 64;
 const UDP_ROUTE_TTL: Duration = Duration::from_secs(30);
 const WEBRTC_ROUTE_TTL: Duration = Duration::from_secs(60);
 const MAX_ROUTE_LIFETIME: Duration = Duration::from_secs(120);
+// Re-sent requests (the controller retries after 3 s and 9 s) keep the offer
+// this often while nothing came back. A controlled side that cannot complete
+// the key exchange drops its reply silently; without the offer it answers
+// with a plain punch, so the controller can still fall back to a relay.
+const MAX_UNANSWERED_OFFERS: u8 = 2;
 // UDP TestNatRequest answers per source IP (IPv6: per /64) and in total
 const TEST_NAT_BURST: f64 = 20.0;
 const TEST_NAT_RATE: f64 = 10.0;
@@ -38,6 +43,7 @@ const LIMITER_SOURCES: usize = 65_536;
 struct WebRtc {
     // DTLS fingerprint of the offer, the clients' ICE session key
     session_key: String,
+    offers: u8,
     to_peer: u32,
     to_controller: u32,
 }
@@ -48,6 +54,8 @@ struct Route {
     peer_ip: IpAddr,
     created: Instant,
     expires: Instant,
+    // a response reached the controller
+    replied: bool,
     // Some(answered) once UDP punching was granted
     udp: Option<bool>,
     webrtc: Option<WebRtc>,
@@ -110,7 +118,8 @@ impl PunchRoutes {
             }
             let full = |map: &HashMap<SocketAddr, Route>| {
                 map.len() >= MAX_ROUTES
-                    || map.keys().filter(|k| k.ip() == ctl.ip()).count() >= MAX_ROUTES_PER_IP
+                    || map.keys().filter(|k| same_host(k.ip(), ctl.ip())).count()
+                        >= MAX_ROUTES_PER_IP
             };
             if full(&map) {
                 map.retain(|_, r| r.alive(now));
@@ -125,6 +134,7 @@ impl PunchRoutes {
                     peer_ip,
                     created: now,
                     expires: now,
+                    replied: false,
                     udp: None,
                     webrtc: None,
                 },
@@ -142,16 +152,23 @@ impl PunchRoutes {
             grant.udp = true;
         }
         if let Some(key) = session_key {
-            match &r.webrtc {
+            match r.webrtc.as_mut() {
                 None => {
                     r.webrtc = Some(WebRtc {
                         session_key: key,
+                        offers: 1,
                         to_peer: 0,
                         to_controller: 0,
                     });
                     grant.webrtc = true;
                 }
-                Some(w) => grant.webrtc = w.session_key == key,
+                Some(w) if w.session_key == key => {
+                    if r.replied || w.offers < MAX_UNANSWERED_OFFERS {
+                        w.offers = w.offers.saturating_add(1);
+                        grant.webrtc = true;
+                    }
+                }
+                Some(_) => {}
             }
         }
         let ttl = if r.webrtc.is_some() {
@@ -248,6 +265,13 @@ impl PunchRoutes {
         }
         r.udp = Some(true);
         Some(r.webrtc.is_some())
+    }
+
+    /// Notes that a response from the peer reached controller connection `ctl`.
+    pub(crate) fn replied(&self, ctl: SocketAddr) {
+        if let Some(r) = self.lock().get_mut(&try_into_v4(ctl)) {
+            r.replied = true;
+        }
     }
 
     pub(crate) fn remove(&self, ctl: SocketAddr) {
@@ -710,6 +734,35 @@ mod tests {
         assert!(!replyable(a("224.0.0.1:5")));
         assert!(!replyable(a("[::ffff:255.255.255.255]:5")));
         assert!(!replyable(a("[ff02::1]:5")));
+    }
+
+    #[test]
+    fn unanswered_offers_are_dropped_from_the_third_request() {
+        let routes = PunchRoutes::default();
+        let key = || Some(FP.to_owned());
+        assert!(routes.open(ctl(1), "peer01", peer_ip(), false, key()).webrtc);
+        assert!(routes.open(ctl(1), "peer01", peer_ip(), false, key()).webrtc);
+        assert!(!routes.open(ctl(1), "peer01", peer_ip(), false, key()).webrtc);
+        // the route itself stays, for a late answer and its candidates
+        assert!(routes.keeps_sink(ctl(1)));
+        // once the peer has replied, re-sent requests keep the offer
+        routes.open(ctl(2), "peer01", peer_ip(), false, key());
+        routes.replied(ctl(2));
+        for _ in 0..5 {
+            assert!(routes.open(ctl(2), "peer01", peer_ip(), false, key()).webrtc);
+        }
+    }
+
+    #[test]
+    fn route_limit_counts_an_ipv6_prefix_as_one_controller() {
+        let routes = PunchRoutes::default();
+        let v6 = |i: u16| SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, i)), 1);
+        for i in 0..MAX_ROUTES_PER_IP as u16 {
+            assert!(routes.open(v6(i + 1), "peer01", peer_ip(), true, None).udp);
+        }
+        assert!(!routes.open(v6(999), "peer01", peer_ip(), true, None).udp);
+        let other = SocketAddr::new("2001:db8:0:2::1".parse().unwrap(), 1);
+        assert!(routes.open(other, "peer01", peer_ip(), true, None).udp);
     }
 
     #[test]

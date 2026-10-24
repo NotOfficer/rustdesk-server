@@ -125,3 +125,14 @@ Checked against the client at 1.5.0 (details in `docs/modern-transports.md`).
   (IPV6-2). A same-/64 check against the controller's TCP address was not
   added: most controllers reach hbbs over IPv4, and multi-homed hosts would
   lose IPv6.
+- **Offer dropped from the third unanswered request** (review finding
+  WEBRTC-2). A controlled 1.5.0 client without the server's key cannot
+  encrypt its answer and replies nothing. A controller with WebRTC on and TCP
+  punch off would then fail where the original server relayed. Re-sent
+  requests without any reply lose the offer, so the peer answers with a
+  plain punch. Cost: if the first `PunchHole` datagram is lost twice, that
+  attempt goes without WebRTC.
+- **Docker build without a `target` cache.** A shared cargo `target` cache
+  mount reuses stale output when another source tree with older file times is
+  built (found by the lab, which builds the baseline from `git archive`).
+  Only the registry and git caches are kept.
