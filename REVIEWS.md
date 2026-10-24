@@ -123,3 +123,12 @@ No critical or major findings; one minor. The reviewer also fuzzed all new messa
 | # | Finding | Verdict | Fix |
 |---|---|---|---|
 | FINAL-6-1 | A 1.5.0 controller's `udp_port`/IPv6 reach a 1.4.1-1.4.9 controlled side, which then punches UDP only (no TCP punch) with probes 1.5.0 does not answer (`RDP?`/`RDP!` are new in 1.5.0): the round ends on the relay after ~3 s instead of the original TCP punch; the parallel TCP round usually wins, but not if TCP punching takes longer. Verified in the client code. | Valid (minor) | `8c1a1ff`: hbbs remembers (in memory) a peer whose reply from its registered host reports a version below 1.5.0 and then withholds `udp_port` and IPv6 from it. Test `legacy_controlled_side_gets_no_udp_port_after_its_reply`. Residual: the first contact after a server start (documented). |
+
+### Round 7 (`873230e..2024e5a`)
+
+The reviewer could not deliver its report (the environment refused the report file and its reply was withheld). Its throwaway tests in its own work directory (`tests/rv_backlog.rs`) showed what it probed; I verified the mechanism myself:
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| FINAL-7-1 | A WebRTC route keeps the controller's sink, and every reply for that controller address (forgeable `PunchHoleSent`/`RelayResponse`, anyone can send them) was sent to it; waiting for the sink had no time limit. With a controller that stops reading, forged replies pile up as spawned tasks (memory) and as blocked connections (file descriptors). Reproduced: a kept sink delivered 6 responses for 6 replies. | Valid (minor) | `cb39d26`: a kept sink serves one response, then only the route's ICE candidates; the 3 s timeout covers waiting for the sink. Test `a_kept_connection_serves_one_response` (failed before the fix). |
+| — | The reviewer's third probe (UDP bytes sent to a never-answering peer per TCP request) shows about 1:1 bytes, no amplification. | Not a finding | — |
