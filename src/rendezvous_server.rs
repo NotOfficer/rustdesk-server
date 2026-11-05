@@ -357,7 +357,7 @@ impl RendezvousServer {
                 }
                 Some(data) = rx.recv() => {
                     match data {
-                        Data::Msg(msg, addr) => { send_udp(socket, &msg, addr).await; }
+                        Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
                         Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
                         Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                     }
@@ -1833,31 +1833,14 @@ impl RendezvousServer {
     }
 }
 
-// Sends a datagram straight on the socket. UdpFramed keeps a frame that failed
-// to send and retries it before every later one, so a reply to an address the
-// kernel refuses (spoofed source) would block all other UDP sends.
+// Sends a datagram without waiting. A failed send only drops it; returned as
+// an error, it would end the loop and rebuild the socket, which a spoofed
+// source the kernel refuses could then trigger at will.
 fn try_send_udp(socket: &FramedSocket, msg: &RendezvousMessage, addr: SocketAddr) {
     if let (FramedSocket::Direct(framed), Ok(bytes)) = (socket, msg.write_to_bytes()) {
         if let Err(err) = framed.get_ref().try_send_to(&bytes, addr) {
             log::debug!("UDP reply to {:?} failed: {}", addr, err);
         }
-    }
-}
-
-// Messages forwarded to a peer (PunchHole, RequestRelay, IceCandidate, ...) go
-// straight to the socket for the same reason: a RequestRelay arrives over TCP
-// in frames up to 64 KiB, too large for one datagram, and the framed socket
-// would retry it before every later send until the socket is rebuilt.
-async fn send_udp(socket: &mut FramedSocket, msg: &RendezvousMessage, addr: SocketAddr) {
-    match socket {
-        FramedSocket::Direct(framed) => {
-            if let Ok(bytes) = msg.write_to_bytes() {
-                if let Err(err) = framed.get_ref().send_to(&bytes, addr).await {
-                    log::debug!("UDP send to {:?} failed: {}", addr, err);
-                }
-            }
-        }
-        _ => allow_err!(socket.send(msg, addr).await),
     }
 }
 
@@ -2089,30 +2072,6 @@ mod tests {
     }
 
     #[hbb_common::tokio::test]
-    async fn a_failed_udp_reply_does_not_block_the_socket() {
-        let msg = || {
-            let mut m = RendezvousMessage::new();
-            m.set_test_nat_response(TestNatResponse::default());
-            m
-        };
-        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        receiver
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .unwrap();
-        let good = receiver.local_addr().unwrap();
-        // without SO_BROADCAST the kernel refuses this destination
-        let refused: SocketAddr = "255.255.255.255:9".parse().unwrap();
-        let mut socket = FramedSocket::new("0.0.0.0:0").await.unwrap();
-        try_send_udp(&socket, &msg(), refused);
-        socket.send(&msg(), good).await.unwrap();
-        let mut buf = [0u8; 64];
-        assert!(receiver.recv_from(&mut buf).is_ok());
-        // the framed send keeps the refused frame and fails on later sends too
-        assert!(socket.send(&msg(), refused).await.is_err());
-        assert!(socket.send(&msg(), good).await.is_err());
-    }
-
-    #[hbb_common::tokio::test]
     async fn an_oversized_forward_does_not_block_the_socket() {
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         receiver
@@ -2127,8 +2086,9 @@ mod tests {
         let mut small = RendezvousMessage::new();
         small.set_test_nat_response(TestNatResponse::default());
         let mut socket = FramedSocket::new("127.0.0.1:0").await.unwrap();
-        send_udp(&mut socket, &big, good).await;
-        send_udp(&mut socket, &small, good).await;
+        // a RequestRelay arrives in TCP frames up to 64 KiB, beyond one datagram
+        assert!(socket.send(&big, good).await.is_err());
+        socket.send(&small, good).await.unwrap();
         socket.send(&small, good).await.unwrap();
         let mut buf = [0u8; 64];
         for _ in 0..2 {

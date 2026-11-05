@@ -11,7 +11,14 @@ RustDesk clients offer besides plain TCP hole punching and relay:
 The protocol is whatever the client sends and expects. Everything below was
 derived from the client source at release tag **1.5.0** (hbb_common
 `229b904`), and compared with tags 1.4.0 and 1.4.9. File references such as
-`client.rs:863` point into the client repository at 1.5.0.
+`client.rs:863` point into `src/` of the
+[client repository at 1.5.0](https://github.com/rustdesk/rustdesk/tree/1.5.0);
+`webrtc.rs` is in its `libs/hbb_common/src/`. Release 1.5.1 (hbb_common
+`fae47e0`) sends the same messages and expects the same replies, except that
+it no longer applies a `ConfigureUpdate` from the server, alone or inside a
+`TestNatResponse`
+([rustdesk@9f9585c](https://github.com/rustdesk/rustdesk/commit/9f9585ce155a6558f0625eaf8fabfe8827c9a552)).
+None of the new paths send one.
 
 Every feature can be switched off; see [Switches](#switches). With all four
 switches off, `hbbs` behaves like the original open-source server, except
@@ -336,14 +343,13 @@ send more, or anything to a third address.
     proven retries come too late. UDP punching then falls back to TCP or
     relay, which is what the original server always did.
   * No reply goes to port 0, or to unspecified, multicast or broadcast
-    addresses. The reply is written straight to the socket: the framed UDP
-    socket keeps a frame that failed to send and retries it before every
-    later one, so a refused (spoofed) destination would otherwise block all
-    other UDP sends. A send error is logged and the reply dropped. Messages
-    forwarded to peers (`PunchHole`, `RequestRelay`, `IceCandidate`, ...) are
-    written the same way, so an oversized `RequestRelay` (TCP frames go up
-    to 64 KiB, a datagram only to 65,507 bytes) cannot block the socket
-    either.
+    addresses. The reply is sent without waiting, and a send error is
+    logged and only drops it. Returned as an error, it would make hbbs
+    rebuild its UDP socket, which a refused (spoofed) destination could then
+    trigger at will. An oversized `RequestRelay` forwarded to a peer (TCP
+    frames go up to 64 KiB, a datagram only to 65,507 bytes) is dropped the
+    same way: hbb_common keeps no failed datagram queued (since `fae47e0`),
+    so later sends are not affected.
 * **UDP `PunchHoleSent`** never causes a UDP packet. It is accepted only if
   * an open punch route exists for the decoded `socket_addr` (A's address),
     created by a verified TCP `PunchHoleRequest` that asked for UDP;
