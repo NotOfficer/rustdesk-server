@@ -259,7 +259,9 @@ impl RendezvousServer {
         );
         load_switch("SECURE_TCP", &SECURE_TCP);
         if SECURE_TCP.load(Ordering::SeqCst) && rs.inner.sk.is_none() {
-            log::warn!("SECURE_TCP has no effect: the key is not a private key, nothing to sign with");
+            log::warn!(
+                "SECURE_TCP has no effect: the key is not a private key, nothing to sign with"
+            );
         }
         load_switch("IPV6_PUNCH", &IPV6_PUNCH);
         load_switch("WEBRTC", &WEBRTC);
@@ -934,7 +936,11 @@ impl RendezvousServer {
         if let Some(peer) = self.pm.get(&id).await {
             let (elapsed, peer_addr, peer_legacy) = {
                 let r = peer.read().await;
-                (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr, r.legacy_punch)
+                (
+                    r.last_reg_time.elapsed().as_millis() as i64,
+                    r.socket_addr,
+                    r.legacy_punch,
+                )
             };
             if elapsed >= REG_TIMEOUT {
                 let mut msg_out = RendezvousMessage::new();
@@ -1656,7 +1662,10 @@ impl RendezvousServer {
             let mut ice = IceCount::default();
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
-                    if !self.handle_tcp(&bytes, &mut sink, addr, key, ws, &mut ice).await {
+                    if !self
+                        .handle_tcp(&bytes, &mut sink, addr, key, ws, &mut ice)
+                        .await
+                    {
                         break;
                     }
                 }
@@ -1731,7 +1740,10 @@ impl RendezvousServer {
                         }
                     }
                 }
-                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws, &mut ice).await {
+                if !self
+                    .handle_tcp(&bytes, &mut sink, addr, key, ws, &mut ice)
+                    .await
+                {
                     break;
                 }
             }
@@ -1909,12 +1921,20 @@ fn load_switch(name: &str, switch: &AtomicBool) {
     match value.as_str() {
         "N" | "NO" | "0" | "FALSE" | "OFF" => switch.store(false, Ordering::SeqCst),
         "" | "Y" | "YES" | "1" | "TRUE" | "ON" => {}
-        _ => log::warn!("{}={} is neither Y nor N, the feature stays on", name, value),
+        _ => log::warn!(
+            "{}={} is neither Y nor N, the feature stays on",
+            name,
+            value
+        ),
     }
     log::info!(
         "{}={}",
         name,
-        if switch.load(Ordering::SeqCst) { "Y" } else { "N" }
+        if switch.load(Ordering::SeqCst) {
+            "Y"
+        } else {
+            "N"
+        }
     );
 }
 

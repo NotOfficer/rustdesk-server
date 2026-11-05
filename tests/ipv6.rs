@@ -254,10 +254,22 @@ async fn v6_replies_are_limited_per_target() {
         // a different controller, each with its own IPv6 /64
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 20, 0, i + 1));
         let mut ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
-        request(&hbbs, &mut ctl, "peer01", v6(&format!("[2001:db8:{}::a]:40001", i + 1))).await;
+        request(
+            &hbbs,
+            &mut ctl,
+            "peer01",
+            v6(&format!("[2001:db8:{}::a]:40001", i + 1)),
+        )
+        .await;
         let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
         assert!(!ph.socket_addr_v6.is_empty());
-        let _reply = punch_hole_sent(&hbbs, ph.socket_addr, "peer01", v6("[2001:db8:ffff::b]:40002")).await;
+        let _reply = punch_hole_sent(
+            &hbbs,
+            ph.socket_addr,
+            "peer01",
+            v6("[2001:db8:ffff::b]:40002"),
+        )
+        .await;
         let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
         if !res.socket_addr_v6.is_empty() {
             forwarded += 1;
@@ -270,7 +282,12 @@ async fn v6_replies_are_limited_per_target() {
 async fn malformed_v6_is_dropped() {
     let hbbs = Hbbs::start(&[], &[]).await;
     let peer = Peer::register(&hbbs, "peer01").await;
-    for bad in [vec![1u8; 17], vec![1u8; 19], vec![0xffu8; 4000], mangle("1.2.3.4:5".parse().unwrap()).to_vec()] {
+    for bad in [
+        vec![1u8; 17],
+        vec![1u8; 19],
+        vec![0xffu8; 4000],
+        mangle("1.2.3.4:5".parse().unwrap()).to_vec(),
+    ] {
         let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
         request(&hbbs, &mut ctl, "peer01", bad.clone().into()).await;
         let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
@@ -292,7 +309,9 @@ async fn websocket_controller_gets_no_v6() {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.socket_addr_v6 = v6(A_V6);
     ws.send(tungstenite::Message::Binary(
-        msg(|m| m.set_punch_hole_request(req)).write_to_bytes().unwrap(),
+        msg(|m| m.set_punch_hole_request(req))
+            .write_to_bytes()
+            .unwrap(),
     ))
     .await
     .unwrap();
@@ -338,7 +357,12 @@ async fn v6_only_from_controllers_since_1_5_0() {
         req.version = version.to_owned();
         ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
         let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
-        assert_eq!(!ph.socket_addr_v6.is_empty(), forwarded, "version {:?}", version);
+        assert_eq!(
+            !ph.socket_addr_v6.is_empty(),
+            forwarded,
+            "version {:?}",
+            version
+        );
     }
 }
 
@@ -347,7 +371,11 @@ async fn v6_only_from_controllers_since_1_5_0() {
 async fn only_global_v6_targets_are_forwarded() {
     let hbbs = Hbbs::start(&[], &[]).await;
     let peer = Peer::register(&hbbs, "peer01").await;
-    let mut mapped = "::ffff:1.2.3.4".parse::<std::net::Ipv6Addr>().unwrap().octets().to_vec();
+    let mut mapped = "::ffff:1.2.3.4"
+        .parse::<std::net::Ipv6Addr>()
+        .unwrap()
+        .octets()
+        .to_vec();
     mapped.extend_from_slice(&5u16.to_le_bytes());
     let targets: Vec<Bytes> = vec![
         v6("[::1]:40001"),
@@ -396,7 +424,13 @@ async fn v6_forwards_are_limited_per_target() {
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 20, 0, i + 1));
         let mut ctl = Tcp::connect(&hbbs, ip, Kx::None).await;
         request(&hbbs, &mut ctl, "peer01", v6("[2001:db8::99]:40001")).await;
-        if !peer.expect(3000, pick_punch_hole).await.unwrap().socket_addr_v6.is_empty() {
+        if !peer
+            .expect(3000, pick_punch_hole)
+            .await
+            .unwrap()
+            .socket_addr_v6
+            .is_empty()
+        {
             forwarded += 1;
         }
     }

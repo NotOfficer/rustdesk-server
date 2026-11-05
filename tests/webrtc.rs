@@ -71,7 +71,12 @@ async fn ice_connection(hbbs: &Hbbs) -> Tcp {
     conn
 }
 
-async fn send_ice_from_peer(conn: &mut Tcp, ph_socket_addr: &Bytes, session_key: &str, candidate: &str) {
+async fn send_ice_from_peer(
+    conn: &mut Tcp,
+    ph_socket_addr: &Bytes,
+    session_key: &str,
+    candidate: &str,
+) {
     let mut c = ice(session_key, candidate);
     c.socket_addr = ph_socket_addr.clone();
     conn.send(&msg(|m| m.set_ice_candidate(c))).await;
@@ -96,13 +101,26 @@ async fn start_session(envs: &[(&str, &str)]) -> Session {
     let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
     assert!(ctl.secured);
     offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
-    let ph = peer.expect(3000, pick_punch_hole).await.expect("no PunchHole");
-    Session { hbbs, peer, ctl, ph }
+    let ph = peer
+        .expect(3000, pick_punch_hole)
+        .await
+        .expect("no PunchHole");
+    Session {
+        hbbs,
+        peer,
+        ctl,
+        ph,
+    }
 }
 
 #[tokio::test]
 async fn offer_answer_and_trickle_ice() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     assert_eq!(ph.webrtc_sdp_offer, offer());
     assert!(!ph.force_relay);
     assert_eq!(ph.udp_port, 0);
@@ -137,7 +155,10 @@ async fn offer_answer_and_trickle_ice() {
         send_ice_from_controller(&mut ctl, "peer01", FP, CANDIDATE).await;
     }
     for _ in 0..2 {
-        let c = peer.expect(3000, pick_ice).await.expect("peer got no candidate");
+        let c = peer
+            .expect(3000, pick_ice)
+            .await
+            .expect("peer got no candidate");
         assert_eq!(c.session_key, FP);
         assert_eq!(c.candidate, CANDIDATE);
     }
@@ -155,7 +176,9 @@ async fn offer_answer_and_trickle_ice() {
 
 #[tokio::test]
 async fn answer_in_relay_response() {
-    let Session { hbbs, mut ctl, ph, .. } = start_session(&[]).await;
+    let Session {
+        hbbs, mut ctl, ph, ..
+    } = start_session(&[]).await;
     // create_relay(initiate = true) with the answer, after secure_tcp_required
     let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::V1).await;
     let mut rr = RelayResponse {
@@ -174,7 +197,10 @@ async fn answer_in_relay_response() {
     // the controller keeps its connection for ICE
     let mut ice_conn = ice_connection(&hbbs).await;
     send_ice_from_peer(&mut ice_conn, &ph.socket_addr, FP, CANDIDATE).await;
-    assert_eq!(ctl.expect(3000, pick_ice).await.unwrap().candidate, CANDIDATE);
+    assert_eq!(
+        ctl.expect(3000, pick_ice).await.unwrap().candidate,
+        CANDIDATE
+    );
 }
 
 // Anybody who knows the controller's address can send a reply; the answer only
@@ -182,7 +208,12 @@ async fn answer_in_relay_response() {
 #[tokio::test]
 async fn answer_only_from_the_peer_host() {
     let stranger_ip = "127.0.0.3".parse().unwrap();
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     let mut stranger = Tcp::connect(&hbbs, stranger_ip, Kx::V1).await;
     stranger
         .send(&msg(|m| {
@@ -225,19 +256,29 @@ async fn same_intranet_offer_gets_a_punch_hole() {
     // the preferred round carries the offer: PunchHole, so WebRTC can use LAN candidates
     let mut ctl = Tcp::connect(&hbbs, PEER_IP, Kx::V1).await;
     offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
-    let ph = peer.expect(3000, pick_punch_hole).await.expect("no PunchHole");
+    let ph = peer
+        .expect(3000, pick_punch_hole)
+        .await
+        .expect("no PunchHole");
     assert_eq!(ph.webrtc_sdp_offer, offer());
     // the offer-less fallback round still gets FetchLocalAddr
     let mut fallback = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
     fallback
-        .send(&msg(|m| m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))))
+        .send(&msg(|m| {
+            m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))
+        }))
         .await;
     assert!(peer.expect(3000, pick_fetch_local_addr).await.is_some());
 }
 
 #[tokio::test]
 async fn foreign_candidates_are_dropped() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     let mut ice_conn = ice_connection(&hbbs).await;
     // wrong session key, unknown controller address, garbage address
     send_ice_from_peer(&mut ice_conn, &ph.socket_addr, "sha-256 00:11", CANDIDATE).await;
@@ -268,7 +309,12 @@ async fn too_many_misses_close_the_connection() {
 
 #[tokio::test]
 async fn ice_is_bounded_per_route() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     let mut ice_conn = ice_connection(&hbbs).await;
     for i in 0..140 {
         send_ice_from_controller(&mut ctl, "peer01", FP, &format!("c{}", i)).await;
@@ -297,7 +343,12 @@ async fn oversized_sdp_and_ice_are_dropped() {
     let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
     assert!(ph.webrtc_sdp_offer.is_empty());
 
-    let Session { hbbs, mut ctl, ph, peer } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        mut ctl,
+        ph,
+        peer,
+    } = start_session(&[]).await;
     let _reply = answer_over_tcp(&hbbs, &ph, endpoint("answer", FP, 4000)).await;
     let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
     assert!(res.webrtc_sdp_answer.is_empty());
@@ -323,7 +374,10 @@ async fn unreadable_offer_is_dropped() {
 
 #[tokio::test]
 async fn switched_off_behaves_like_before() {
-    for (envs, args) in [(vec![("WEBRTC", "N")], vec![]), (vec![], vec!["--webrtc", "N"])] {
+    for (envs, args) in [
+        (vec![("WEBRTC", "N")], vec![]),
+        (vec![], vec!["--webrtc", "N"]),
+    ] {
         let hbbs = Hbbs::start(&envs, &args).await;
         let peer = Peer::register(&hbbs, "peer01").await;
         let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
@@ -368,7 +422,13 @@ async fn force_relay_travels_with_the_offer() {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.force_relay = true;
     ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    assert!(!peer.expect(3000, pick_punch_hole).await.unwrap().force_relay);
+    assert!(
+        !peer
+            .expect(3000, pick_punch_hole)
+            .await
+            .unwrap()
+            .force_relay
+    );
 }
 
 #[tokio::test]
@@ -382,7 +442,9 @@ async fn websocket_offer_is_dropped() {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.webrtc_sdp_offer = offer();
     ws.send(tungstenite::Message::Binary(
-        msg(|m| m.set_punch_hole_request(req)).write_to_bytes().unwrap(),
+        msg(|m| m.set_punch_hole_request(req))
+            .write_to_bytes()
+            .unwrap(),
     ))
     .await
     .unwrap();
@@ -406,7 +468,12 @@ async fn routes_end_with_the_controller_connection() {
 // Waits out the 60 s WebRTC route TTL while the controller keeps its connection.
 #[tokio::test]
 async fn routes_expire() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_secs(18)).await;
         // keeps the connection busy without refreshing the route
@@ -430,7 +497,12 @@ async fn routes_expire() {
 // offer, so the peer answers with a plain punch and the controller can relay.
 #[tokio::test]
 async fn unanswered_retries_lose_the_offer() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     assert!(!ph.webrtc_sdp_offer.is_empty());
     offer_request(&hbbs, &mut ctl, "peer01", offer()).await;
     let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
@@ -442,7 +514,12 @@ async fn unanswered_retries_lose_the_offer() {
 
 #[tokio::test]
 async fn answered_retries_keep_the_offer() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     let _reply = answer_over_tcp(&hbbs, &ph, answer()).await;
     assert!(ctl.expect(3000, pick_punch_hole_response).await.is_some());
     for _ in 0..3 {
@@ -470,7 +547,12 @@ async fn ipv6_controller_gets_answer_and_ice() {
     let mut got_answer = false;
     let mut got_ice = false;
     while !(got_answer && got_ice) {
-        match ctl.recv(3000).await.expect("controller got too little").union {
+        match ctl
+            .recv(3000)
+            .await
+            .expect("controller got too little")
+            .union
+        {
             Some(rendezvous_message::Union::PunchHoleResponse(r)) => {
                 assert_eq!(r.webrtc_sdp_answer, answer());
                 got_answer = true;
@@ -517,7 +599,15 @@ async fn websocket_ice_candidate_closes_as_before() {
 
 #[tokio::test]
 async fn switch_values_false_and_off_turn_features_off() {
-    let hbbs = Hbbs::start(&[("WEBRTC", "false"), ("IPV6_PUNCH", "off"), ("UDP_PUNCH", "0")], &[]).await;
+    let hbbs = Hbbs::start(
+        &[
+            ("WEBRTC", "false"),
+            ("IPV6_PUNCH", "off"),
+            ("UDP_PUNCH", "0"),
+        ],
+        &[],
+    )
+    .await;
     let peer = Peer::register(&hbbs, "peer01").await;
     let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::V1).await;
     let mut req = punch_hole_request("peer01", &hbbs.key);
@@ -540,7 +630,9 @@ async fn switch_values_false_and_off_turn_features_off() {
 // only the ICE candidates of the route.
 #[tokio::test]
 async fn a_kept_connection_serves_one_response() {
-    let Session { hbbs, mut ctl, ph, .. } = start_session(&[]).await;
+    let Session {
+        hbbs, mut ctl, ph, ..
+    } = start_session(&[]).await;
     let relay_response = || {
         let mut rr = RelayResponse {
             socket_addr: ph.socket_addr.clone(),
@@ -579,7 +671,12 @@ async fn a_kept_connection_serves_one_response() {
 // count as misses and do not close the controller's signalling connection.
 #[tokio::test]
 async fn over_budget_candidates_keep_the_connection() {
-    let Session { hbbs, peer, mut ctl, ph } = start_session(&[]).await;
+    let Session {
+        hbbs,
+        peer,
+        mut ctl,
+        ph,
+    } = start_session(&[]).await;
     for i in 0..160 {
         send_ice_from_controller(&mut ctl, "peer01", FP, &format!("c{}", i)).await;
     }

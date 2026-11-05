@@ -85,8 +85,8 @@ mod tests {
     ) -> (KeyExchange, Encrypt) {
         let their_pk = sign::verify(&ex.keys[0], server_pk).unwrap();
         let params = sign::verify(&ex.signed_params, server_pk).unwrap();
-        let params = KxParams::parse_from_bytes(params.strip_prefix(KX_PARAMS_DOMAIN).unwrap())
-            .unwrap();
+        let params =
+            KxParams::parse_from_bytes(params.strip_prefix(KX_PARAMS_DOMAIN).unwrap()).unwrap();
         assert_eq!(&params.pk[..], &their_pk[..]);
         assert_eq!(params.version, ex.version);
         let mut pk = [0u8; box_::PUBLICKEYBYTES];

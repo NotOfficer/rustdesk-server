@@ -108,7 +108,13 @@ impl Hbbs {
                 .stdin(Stdio::null())
                 .stdout(log.try_clone().unwrap())
                 .stderr(log);
-            for k in ["SECURE_TCP", "IPV6_PUNCH", "WEBRTC", "UDP_PUNCH", "ALWAYS_USE_RELAY"] {
+            for k in [
+                "SECURE_TCP",
+                "IPV6_PUNCH",
+                "WEBRTC",
+                "UDP_PUNCH",
+                "ALWAYS_USE_RELAY",
+            ] {
                 cmd.env_remove(k);
             }
             for (k, v) in envs {
@@ -251,10 +257,7 @@ impl Peer {
             let deadline = Instant::now() + Duration::from_millis(1000);
             while let Some(m) = peer.recv_until(deadline).await {
                 if let Some(rendezvous_message::Union::RegisterPkResponse(r)) = m.union {
-                    assert_eq!(
-                        r.result.enum_value(),
-                        Ok(register_pk_response::Result::OK)
-                    );
+                    assert_eq!(r.result.enum_value(), Ok(register_pk_response::Result::OK));
                     return peer;
                 }
             }

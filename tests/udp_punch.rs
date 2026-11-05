@@ -24,9 +24,7 @@ async fn drain(sock: &UdpSocket, ms: u64) -> Vec<RendezvousMessage> {
     let mut out = vec![];
     let mut buf = vec![0u8; 65536];
     let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
-    while let Ok(Ok((n, _))) =
-        tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await
-    {
+    while let Ok(Ok((n, _))) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
         if let Some(m) = parse(&buf[..n]) {
             out.push(m);
         }
@@ -60,7 +58,12 @@ async fn udp_test_nat_reports_the_port_only() {
     assert_eq!(res.port, sock.local_addr().unwrap().port() as i32);
     assert!(res.cu.is_none());
     // the answer is the port and nothing else: at most 4 bytes more than the request
-    assert!(n <= req.len() + 4, "answer {} bytes for a {} byte request", n, req.len());
+    assert!(
+        n <= req.len() + 4,
+        "answer {} bytes for a {} byte request",
+        n,
+        req.len()
+    );
 }
 
 #[tokio::test]
@@ -87,10 +90,15 @@ async fn udp_test_nat_is_rate_limited() {
 
 #[tokio::test]
 async fn switched_off_ignores_udp() {
-    for (envs, args) in [(vec![("UDP_PUNCH", "N")], vec![]), (vec![], vec!["--udp-punch", "N"])] {
+    for (envs, args) in [
+        (vec![("UDP_PUNCH", "N")], vec![]),
+        (vec![], vec!["--udp-punch", "N"]),
+    ] {
         let hbbs = Hbbs::start(&envs, &args).await;
         let sock = udp_socket(CONTROLLER_IP).await;
-        sock.send_to(&test_nat_request(), hbbs.udp_addr()).await.unwrap();
+        sock.send_to(&test_nat_request(), hbbs.udp_addr())
+            .await
+            .unwrap();
         assert!(drain(&sock, 700).await.is_empty());
         let peer = Peer::register(&hbbs, "peer01").await;
         let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
@@ -123,7 +131,9 @@ async fn send_hole_sent(
     if let Some(f) = extra {
         f(&mut phs);
     }
-    let bytes = msg(|m| m.set_punch_hole_sent(phs)).write_to_bytes().unwrap();
+    let bytes = msg(|m| m.set_punch_hole_sent(phs))
+        .write_to_bytes()
+        .unwrap();
     sock.send_to(&bytes, hbbs.udp_addr()).await.unwrap();
 }
 
@@ -139,9 +149,19 @@ async fn start_udp_punch(kx: Kx) -> Punch {
     let peer = Peer::register(&hbbs, "peer01").await;
     // the UDP NAT test gives the controller its punch port
     let ctl_udp = udp_socket(CONTROLLER_IP).await;
-    ctl_udp.send_to(&test_nat_request(), hbbs.udp_addr()).await.unwrap();
-    ctl_udp.send_to(&test_nat_request(), hbbs.udp_addr()).await.unwrap();
-    let port = match drain(&ctl_udp, 500).await.first().and_then(|m| m.union.clone()) {
+    ctl_udp
+        .send_to(&test_nat_request(), hbbs.udp_addr())
+        .await
+        .unwrap();
+    ctl_udp
+        .send_to(&test_nat_request(), hbbs.udp_addr())
+        .await
+        .unwrap();
+    let port = match drain(&ctl_udp, 500)
+        .await
+        .first()
+        .and_then(|m| m.union.clone())
+    {
         Some(rendezvous_message::Union::TestNatResponse(r)) => r.port,
         other => panic!("no TestNatResponse: {:?}", other),
     };
@@ -149,21 +169,37 @@ async fn start_udp_punch(kx: Kx) -> Punch {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.udp_port = port;
     ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    let ph = peer.expect(5000, pick_punch_hole).await.expect("no PunchHole");
+    let ph = peer
+        .expect(5000, pick_punch_hole)
+        .await
+        .expect("no PunchHole");
     assert_eq!(ph.udp_port, port);
-    Punch { hbbs, peer, ctl, ph }
+    Punch {
+        hbbs,
+        peer,
+        ctl,
+        ph,
+    }
 }
 
 #[tokio::test]
 async fn udp_punch_reaches_the_controller_over_tcp() {
     for kx in [Kx::None, Kx::V1] {
-        let Punch { hbbs, peer, mut ctl, ph } = start_udp_punch(kx).await;
+        let Punch {
+            hbbs,
+            peer,
+            mut ctl,
+            ph,
+        } = start_udp_punch(kx).await;
         // three copies from a fresh socket of the same host, like punch_udp_hole
         let punch = udp_socket(PEER_IP).await;
         for _ in 0..3 {
             send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", None).await;
         }
-        let res = ctl.expect(3000, pick_punch_hole_response).await.expect("no response");
+        let res = ctl
+            .expect(3000, pick_punch_hole_response)
+            .await
+            .expect("no response");
         assert!(res.is_udp);
         assert_eq!(demangle(&res.socket_addr), punch.local_addr().unwrap());
         assert_eq!(res.relay_server, "relay.example:21117");
@@ -183,8 +219,10 @@ async fn forged_hole_sent_without_a_route_sends_nothing() {
     let peer = Peer::register(&hbbs, "peer01").await;
     // a controller that did not ask for UDP
     let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
-    ctl.send(&msg(|m| m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))))
-        .await;
+    ctl.send(&msg(|m| {
+        m.set_punch_hole_request(punch_hole_request("peer01", &hbbs.key))
+    }))
+    .await;
     let ph = peer.expect(3000, pick_punch_hole).await.unwrap();
     let forger = udp_socket(PEER_IP).await;
     send_hole_sent(&forger, &hbbs, &ph.socket_addr, "peer01", None).await;
@@ -198,7 +236,9 @@ async fn forged_hole_sent_without_a_route_sends_nothing() {
 
 #[tokio::test]
 async fn hole_sent_for_another_id_is_ignored() {
-    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let Punch {
+        hbbs, mut ctl, ph, ..
+    } = start_udp_punch(Kx::None).await;
     let punch = udp_socket(PEER_IP).await;
     send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer02", None).await;
     assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
@@ -214,12 +254,20 @@ async fn hole_sent_for_another_id_is_ignored() {
 // the route the peer's own reply needs.
 #[tokio::test]
 async fn hole_sent_from_another_host_is_ignored() {
-    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let Punch {
+        hbbs, mut ctl, ph, ..
+    } = start_udp_punch(Kx::None).await;
     let stranger = udp_socket("127.0.0.3".parse().unwrap()).await;
-    send_hole_sent(&stranger, &hbbs, &ph.socket_addr, "peer01", Some(|phs| {
-        phs.socket_addr_v6 = mangle("[2001:db8::66]:4000".parse().unwrap());
-        phs.webrtc_sdp_answer = "webrtc://forged".to_owned();
-    }))
+    send_hole_sent(
+        &stranger,
+        &hbbs,
+        &ph.socket_addr,
+        "peer01",
+        Some(|phs| {
+            phs.socket_addr_v6 = mangle("[2001:db8::66]:4000".parse().unwrap());
+            phs.webrtc_sdp_answer = "webrtc://forged".to_owned();
+        }),
+    )
     .await;
     assert!(ctl.expect(700, pick_punch_hole_response).await.is_none());
     assert!(drain(&stranger, 100).await.is_empty());
@@ -258,13 +306,18 @@ async fn wrong_licence_key_opens_no_udp_route() {
     let mut req = punch_hole_request("peer01", &key);
     req.udp_port = 40000;
     ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    assert_eq!(peer.expect(3000, pick_punch_hole).await.unwrap().udp_port, 40000);
+    assert_eq!(
+        peer.expect(3000, pick_punch_hole).await.unwrap().udp_port,
+        40000
+    );
 }
 
 // A 1.4.0 controlled side knows no udp_port and answers over TCP as before.
 #[tokio::test]
 async fn old_controlled_side_answers_over_tcp() {
-    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let Punch {
+        hbbs, mut ctl, ph, ..
+    } = start_udp_punch(Kx::None).await;
     let mut reply = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
     let reply_addr = reply.local_addr();
     reply
@@ -319,7 +372,9 @@ async fn udp_ipv6_and_webrtc_in_one_round() {
         ..Default::default()
     };
     for _ in 0..3 {
-        let bytes = msg(|m| m.set_punch_hole_sent(phs.clone())).write_to_bytes().unwrap();
+        let bytes = msg(|m| m.set_punch_hole_sent(phs.clone()))
+            .write_to_bytes()
+            .unwrap();
         punch.send_to(&bytes, hbbs.udp_addr()).await.unwrap();
     }
     let res = ctl.expect(3000, pick_punch_hole_response).await.unwrap();
@@ -368,7 +423,9 @@ async fn garbage_does_not_crash_the_server() {
                 socket_addr_v6: bytes.clone().into(),
                 ..Default::default()
             };
-            bytes = msg(|m| m.set_punch_hole_sent(phs)).write_to_bytes().unwrap();
+            bytes = msg(|m| m.set_punch_hole_sent(phs))
+                .write_to_bytes()
+                .unwrap();
         }
         sock.send_to(&bytes, hbbs.udp_addr()).await.ok();
     }
@@ -385,7 +442,10 @@ async fn garbage_does_not_crash_the_server() {
         ));
     }
     let fresh = udp_socket(PEER_IP).await;
-    fresh.send_to(&test_nat_request(), hbbs.udp_addr()).await.unwrap();
+    fresh
+        .send_to(&test_nat_request(), hbbs.udp_addr())
+        .await
+        .unwrap();
     assert_eq!(drain(&fresh, 700).await.len(), 1);
 }
 
@@ -398,7 +458,10 @@ async fn invalid_or_forced_udp_port_is_not_forwarded() {
         let mut req = punch_hole_request("peer01", &hbbs.key);
         req.udp_port = port;
         ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-        assert_eq!(peer.expect(3000, pick_punch_hole).await.unwrap().udp_port, 0);
+        assert_eq!(
+            peer.expect(3000, pick_punch_hole).await.unwrap().udp_port,
+            0
+        );
     }
     let hbbs = Hbbs::start(&[("ALWAYS_USE_RELAY", "Y")], &[]).await;
     let peer = Peer::register(&hbbs, "peer01").await;
@@ -406,7 +469,10 @@ async fn invalid_or_forced_udp_port_is_not_forwarded() {
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.udp_port = 40000;
     ctl.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    assert_eq!(peer.expect(3000, pick_punch_hole).await.unwrap().udp_port, 0);
+    assert_eq!(
+        peer.expect(3000, pick_punch_hole).await.unwrap().udp_port,
+        0
+    );
 }
 
 #[tokio::test]
@@ -423,7 +489,9 @@ async fn same_intranet_without_offer_keeps_fetch_local_addr() {
 // Waits out the 30 s UDP route TTL while the controller keeps its connection.
 #[tokio::test]
 async fn udp_routes_expire() {
-    let Punch { hbbs, mut ctl, ph, .. } = start_udp_punch(Kx::None).await;
+    let Punch {
+        hbbs, mut ctl, ph, ..
+    } = start_udp_punch(Kx::None).await;
     tokio::time::sleep(Duration::from_secs(20)).await;
     // keeps the connection without touching the route (an unmatched candidate)
     ctl.send(&msg(|m| {
@@ -456,7 +524,9 @@ async fn connected_controllers_keep_their_nat_test() {
     let stranger = udp_socket("127.9.9.9".parse().unwrap()).await;
     // 30 other sources use up the global budget
     let sources: Vec<std::net::UdpSocket> = (0..30u8)
-        .filter_map(|i| std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 10, 0, i + 1), 0)).ok())
+        .filter_map(|i| {
+            std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 10, 0, i + 1), 0)).ok()
+        })
         .collect();
     for s in &sources {
         s.send_to(&req, server).ok();
@@ -479,7 +549,9 @@ async fn nat_test_retry_after_the_connect_is_answered() {
     let req = test_nat_request();
     let server = hbbs.udp_addr();
     let sources: Vec<std::net::UdpSocket> = (0..30u8)
-        .filter_map(|i| std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 11, 0, i + 1), 0)).ok())
+        .filter_map(|i| {
+            std::net::UdpSocket::bind((std::net::Ipv4Addr::new(127, 11, 0, i + 1), 0)).ok()
+        })
         .collect();
     for s in &sources {
         s.send_to(&req, server).ok();
@@ -510,7 +582,13 @@ async fn nat_test_retry_after_the_connect_is_answered() {
 async fn udp_only_from_controllers_since_1_5_0() {
     let hbbs = Hbbs::start(&[], &[]).await;
     let peer = Peer::register(&hbbs, "peer01").await;
-    for (version, forwarded) in [("1.4.0", false), ("1.4.1", false), ("1.4.9", false), ("1.5.0", true), ("1.6.0", true)] {
+    for (version, forwarded) in [
+        ("1.4.0", false),
+        ("1.4.1", false),
+        ("1.4.9", false),
+        ("1.5.0", true),
+        ("1.6.0", true),
+    ] {
         let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
         let mut req = punch_hole_request("peer01", &hbbs.key);
         req.udp_port = 40000;
@@ -553,8 +631,20 @@ async fn legacy_controlled_side_gets_no_udp_port_after_its_reply() {
     let (mut ctl, ph) = request_udp(&hbbs, &peer).await;
     assert_eq!(ph.udp_port, 40000);
     let punch = udp_socket(PEER_IP).await;
-    send_hole_sent(&punch, &hbbs, &ph.socket_addr, "peer01", Some(|p| p.version = "1.4.9".to_owned())).await;
-    assert!(ctl.expect(3000, pick_punch_hole_response).await.unwrap().is_udp);
+    send_hole_sent(
+        &punch,
+        &hbbs,
+        &ph.socket_addr,
+        "peer01",
+        Some(|p| p.version = "1.4.9".to_owned()),
+    )
+    .await;
+    assert!(
+        ctl.expect(3000, pick_punch_hole_response)
+            .await
+            .unwrap()
+            .is_udp
+    );
     // from now on: no udp_port, no IPv6
     let (_ctl, ph) = request_udp(&hbbs, &peer).await;
     assert_eq!(ph.udp_port, 0);
@@ -594,24 +684,34 @@ async fn forged_replies_do_not_mark_a_peer_legacy() {
     let mut ctl = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
     let mut req = punch_hole_request("peer01", &hbbs.key);
     req.udp_port = 40000;
-    ctl.send(&msg(|m| m.set_punch_hole_request(req.clone()))).await;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req.clone())))
+        .await;
     let ph = peer.expect(5000, pick_punch_hole).await.unwrap();
     // over WebSocket, claiming the peer's address in a header
-    let mut request = tungstenite::client::IntoClientRequest::into_client_request(
-        format!("ws://{}", hbbs.ws_addr()),
-    )
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+        "ws://{}",
+        hbbs.ws_addr()
+    ))
     .unwrap();
-    request.headers_mut().insert("X-Real-IP", PEER_IP.to_string().parse().unwrap());
+    request
+        .headers_mut()
+        .insert("X-Real-IP", PEER_IP.to_string().parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    ws.send(tungstenite::Message::Binary(old_reply(ph.socket_addr.clone())))
-        .await
-        .unwrap();
+    ws.send(tungstenite::Message::Binary(old_reply(
+        ph.socket_addr.clone(),
+    )))
+    .await
+    .unwrap();
     // over TCP from the peer's host, but for no waiting controller
     let mut tcp = Tcp::connect(&hbbs, PEER_IP, Kx::None).await;
-    tcp.send_raw(old_reply(mangle("127.0.0.9:4000".parse().unwrap()))).await;
+    tcp.send_raw(old_reply(mangle("127.0.0.9:4000".parse().unwrap())))
+        .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let mut ctl2 = Tcp::connect(&hbbs, CONTROLLER_IP, Kx::None).await;
     ctl2.send(&msg(|m| m.set_punch_hole_request(req))).await;
-    assert_eq!(peer.expect(5000, pick_punch_hole).await.unwrap().udp_port, 40000);
+    assert_eq!(
+        peer.expect(5000, pick_punch_hole).await.unwrap().udp_port,
+        40000
+    );
     drop(ctl);
 }

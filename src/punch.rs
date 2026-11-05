@@ -521,7 +521,12 @@ impl RateLimiter {
     /// a full source table refuses unknown sources.
     pub(crate) fn test_nat(global_rate: u32) -> Self {
         let rate = global_rate.max(1) as f64;
-        Self::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((2.0 * rate, rate)), false)
+        Self::new(
+            TEST_NAT_BURST,
+            TEST_NAT_RATE,
+            Some((2.0 * rate, rate)),
+            false,
+        )
     }
 
     /// IPv6 addresses forwarded from a controller: the peer sends punch probes
@@ -794,15 +799,30 @@ mod tests {
         assert_eq!(offer_session_key(&offer(&media)).as_deref(), Some(FP));
         assert_eq!(offer_session_key(&offer("v=0\r\ns=-\r\n")), None);
         assert_eq!(offer_session_key("webrtc://not base64!"), None);
-        assert_eq!(offer_session_key(&format!("webrtc://{}", base64::encode("[1,2]"))), None);
-        assert_eq!(offer_session_key(&offer(&session).replace("webrtc://", "x://")), None);
-        let big = format!("v=0\r\na=fingerprint:{}\r\na=x:{}\r\n", FP, "y".repeat(MAX_SDP_LEN));
+        assert_eq!(
+            offer_session_key(&format!("webrtc://{}", base64::encode("[1,2]"))),
+            None
+        );
+        assert_eq!(
+            offer_session_key(&offer(&session).replace("webrtc://", "x://")),
+            None
+        );
+        let big = format!(
+            "v=0\r\na=fingerprint:{}\r\na=x:{}\r\n",
+            FP,
+            "y".repeat(MAX_SDP_LEN)
+        );
         assert_eq!(offer_session_key(&offer(&big)), None);
     }
 
     #[test]
     fn decode_matches_addr_mangle_and_never_panics() {
-        for addr in ["1.2.3.4:5", "255.255.255.255:65535", "0.0.0.0:0", "[2001:db8::1]:443"] {
+        for addr in [
+            "1.2.3.4:5",
+            "255.255.255.255:65535",
+            "0.0.0.0:0",
+            "[2001:db8::1]:443",
+        ] {
             let addr: SocketAddr = addr.parse().unwrap();
             assert_eq!(decode_addr(&AddrMangle::encode(addr)), Some(addr));
         }
@@ -828,17 +848,45 @@ mod tests {
     #[test]
     fn routes_need_a_purpose_and_keep_their_peer() {
         let routes = PunchRoutes::default();
-        assert_eq!(routes.open(ctl(1), "peer01", peer_ip(), want(false, false), None), Grant::default());
+        assert_eq!(
+            routes.open(ctl(1), "peer01", peer_ip(), want(false, false), None),
+            Grant::default()
+        );
         assert_eq!(routes.len(), 0);
-        let g = routes.open(ctl(1), "peer01", peer_ip(), want(true, false), Some(FP.to_owned()));
-        assert_eq!(g, Grant { udp: true, webrtc: true, v6: false });
+        let g = routes.open(
+            ctl(1),
+            "peer01",
+            peer_ip(),
+            want(true, false),
+            Some(FP.to_owned()),
+        );
+        assert_eq!(
+            g,
+            Grant {
+                udp: true,
+                webrtc: true,
+                v6: false
+            }
+        );
         // the same connection cannot switch to another peer or session
         assert_eq!(
-            routes.open(ctl(1), "peer02", peer_ip(), want(true, false), Some(FP.to_owned())),
+            routes.open(
+                ctl(1),
+                "peer02",
+                peer_ip(),
+                want(true, false),
+                Some(FP.to_owned())
+            ),
             Grant::default()
         );
         assert_eq!(
-            routes.open(ctl(1), "peer01", peer_ip(), want(false, false), Some("other".to_owned())),
+            routes.open(
+                ctl(1),
+                "peer01",
+                peer_ip(),
+                want(false, false),
+                Some("other".to_owned())
+            ),
             Grant::default()
         );
         assert!(routes.keeps_sink(ctl(1)));
@@ -846,32 +894,74 @@ mod tests {
         assert!(!routes.keeps_sink(ctl(1)));
         // a forwarded IPv6 address is a purpose of its own
         let g = routes.open(ctl(4), "peer01", peer_ip(), want(false, true), None);
-        assert_eq!(g, Grant { udp: false, webrtc: false, v6: true });
+        assert_eq!(
+            g,
+            Grant {
+                udp: false,
+                webrtc: false,
+                v6: true
+            }
+        );
         assert!(!routes.keeps_sink(ctl(4)));
     }
 
     #[test]
     fn replies_carry_extras_only_from_the_peer_host() {
         let routes = PunchRoutes::default();
-        routes.open(ctl(1), "peer01", peer_ip(), want(true, true), Some(FP.to_owned()));
-        let all = Grant { udp: true, webrtc: true, v6: true };
+        routes.open(
+            ctl(1),
+            "peer01",
+            peer_ip(),
+            want(true, true),
+            Some(FP.to_owned()),
+        );
+        let all = Grant {
+            udp: true,
+            webrtc: true,
+            v6: true,
+        };
         assert_eq!(routes.reply_grant(ctl(1), "peer01", peer_ip()), all);
-        assert_eq!(routes.reply_grant(ctl(1), "peer01", "::ffff:10.0.0.2".parse().unwrap()), all);
-        assert_eq!(routes.reply_grant(ctl(1), "peer02", peer_ip()), Grant::default());
+        assert_eq!(
+            routes.reply_grant(ctl(1), "peer01", "::ffff:10.0.0.2".parse().unwrap()),
+            all
+        );
+        assert_eq!(
+            routes.reply_grant(ctl(1), "peer02", peer_ip()),
+            Grant::default()
+        );
         let stranger = "10.9.9.9".parse().unwrap();
-        assert_eq!(routes.reply_grant(ctl(1), "peer01", stranger), Grant::default());
-        assert_eq!(routes.reply_grant(ctl(2), "peer01", peer_ip()), Grant::default());
+        assert_eq!(
+            routes.reply_grant(ctl(1), "peer01", stranger),
+            Grant::default()
+        );
+        assert_eq!(
+            routes.reply_grant(ctl(2), "peer01", peer_ip()),
+            Grant::default()
+        );
         // only what the request was granted comes back
         routes.open(ctl(3), "peer01", peer_ip(), want(true, false), None);
-        let udp_only = Grant { udp: true, webrtc: false, v6: false };
+        let udp_only = Grant {
+            udp: true,
+            webrtc: false,
+            v6: false,
+        };
         assert_eq!(routes.reply_grant(ctl(3), "peer01", peer_ip()), udp_only);
     }
 
     #[test]
     fn ice_needs_the_session_key_and_has_a_budget() {
         let routes = PunchRoutes::default();
-        routes.open(ctl(1), "peer01", peer_ip(), want(false, false), Some(FP.to_owned()));
-        assert_eq!(routes.ice_to_peer(ctl(1), "peer01", "sha-256 00"), Ice::NoMatch);
+        routes.open(
+            ctl(1),
+            "peer01",
+            peer_ip(),
+            want(false, false),
+            Some(FP.to_owned()),
+        );
+        assert_eq!(
+            routes.ice_to_peer(ctl(1), "peer01", "sha-256 00"),
+            Ice::NoMatch
+        );
         assert_eq!(routes.ice_to_peer(ctl(1), "peer02", FP), Ice::NoMatch);
         assert_eq!(routes.ice_to_controller(ctl(2), FP), Ice::NoMatch);
         for _ in 0..MAX_ICE_PER_DIRECTION {
@@ -891,19 +981,46 @@ mod tests {
         let routes = PunchRoutes::default();
         let t0 = Instant::now();
         routes.open_at(t0, ctl(1), "peer01", peer_ip(), want(true, false), None);
-        routes.open_at(t0, ctl(2), "peer01", peer_ip(), want(false, false), Some(FP.to_owned()));
+        routes.open_at(
+            t0,
+            ctl(2),
+            "peer01",
+            peer_ip(),
+            want(false, false),
+            Some(FP.to_owned()),
+        );
         let src = SocketAddr::new(peer_ip(), 5000);
         assert!(!routes.claim_udp_at(t0 + UDP_ROUTE_TTL, ctl(1), "peer01", src));
-        assert_eq!(routes.ice_at(t0 + WEBRTC_ROUTE_TTL, ctl(2), None, FP), Ice::NoMatch);
+        assert_eq!(
+            routes.ice_at(t0 + WEBRTC_ROUTE_TTL, ctl(2), None, FP),
+            Ice::NoMatch
+        );
         // refreshing never extends a route past its lifetime
         let mut t = t0;
         while t < t0 + MAX_ROUTE_LIFETIME {
-            routes.open_at(t, ctl(2), "peer01", peer_ip(), want(false, false), Some(FP.to_owned()));
+            routes.open_at(
+                t,
+                ctl(2),
+                "peer01",
+                peer_ip(),
+                want(false, false),
+                Some(FP.to_owned()),
+            );
             t += Duration::from_secs(10);
         }
-        assert_eq!(routes.ice_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), None, FP), Ice::NoMatch);
+        assert_eq!(
+            routes.ice_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), None, FP),
+            Ice::NoMatch
+        );
         // an expired route is replaced by a new request
-        let g = routes.open_at(t0 + MAX_ROUTE_LIFETIME, ctl(2), "peer02", peer_ip(), want(true, false), None);
+        let g = routes.open_at(
+            t0 + MAX_ROUTE_LIFETIME,
+            ctl(2),
+            "peer02",
+            peer_ip(),
+            want(true, false),
+            None,
+        );
         assert!(g.udp);
     }
 
@@ -920,7 +1037,13 @@ mod tests {
         assert!(!routes.claim_udp(ctl(3), "peer01", other));
         assert!(routes.claim_udp(ctl(3), "peer01", SocketAddr::new(peer_ip(), 5000)));
         // no UDP granted, no claim
-        routes.open(ctl(2), "peer01", peer_ip(), want(false, false), Some(FP.to_owned()));
+        routes.open(
+            ctl(2),
+            "peer01",
+            peer_ip(),
+            want(false, false),
+            Some(FP.to_owned()),
+        );
         assert!(!routes.claim_udp(ctl(2), "peer01", SocketAddr::new(peer_ip(), 1)));
     }
 
@@ -957,7 +1080,9 @@ mod tests {
         // a proven source still gets its own budget when the global one is empty
         let proven: IpAddr = "192.0.2.1".parse().unwrap();
         assert!(!limiter.allow_at(t0, "192.0.2.2".parse().unwrap(), false));
-        let n = (0..100).filter(|_| limiter.allow_at(t0, proven, true)).count();
+        let n = (0..100)
+            .filter(|_| limiter.allow_at(t0, proven, true))
+            .count();
         assert_eq!(n, TEST_NAT_BURST as usize);
     }
 
@@ -1006,7 +1131,11 @@ mod tests {
         let t1 = t0 + Duration::from_secs(1);
         assert!(!limiter.allow_at(t1, "1.1.1.2".parse().unwrap(), false));
         assert_eq!(limiter.inner.lock().unwrap().last_sweep, Some(t0));
-        assert!(limiter.allow_at(t0 + Duration::from_secs(3), "1.1.1.1".parse().unwrap(), false));
+        assert!(limiter.allow_at(
+            t0 + Duration::from_secs(3),
+            "1.1.1.1".parse().unwrap(),
+            false
+        ));
         // with a global budget, a proven source passes a full table on that
         // budget, without an entry of its own
         let limiter = RateLimiter::new(TEST_NAT_BURST, TEST_NAT_RATE, Some((1e9, 1e9)), false);
@@ -1065,11 +1194,22 @@ mod tests {
         let m = |s: &str| AddrMangle::encode(s.parse::<SocketAddr>().unwrap());
         assert!(global_v6(&m("[2001:db8::1]:40000")));
         assert!(global_v6(&m("[2a00:1450::5]:1")));
-        for bad in ["[2001:db8::1]:0", "[::1]:5", "[fe80::1]:5", "[fd00::1]:5", "[ff02::1]:5", "[64:ff9b::102:304]:5"] {
+        for bad in [
+            "[2001:db8::1]:0",
+            "[::1]:5",
+            "[fe80::1]:5",
+            "[fd00::1]:5",
+            "[ff02::1]:5",
+            "[64:ff9b::102:304]:5",
+        ] {
             assert!(!global_v6(&m(bad)), "{}", bad);
         }
         // a v4-mapped address in the raw 18-byte form, and a mangled IPv4
-        let mut mapped = "::ffff:1.2.3.4".parse::<Ipv6Addr>().unwrap().octets().to_vec();
+        let mut mapped = "::ffff:1.2.3.4"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+            .octets()
+            .to_vec();
         mapped.extend_from_slice(&5u16.to_le_bytes());
         assert!(!global_v6(&mapped));
         assert!(!global_v6(&m("1.2.3.4:5")));
@@ -1087,7 +1227,10 @@ mod tests {
         assert!(!version_at_least("", (1, 5, 0)));
         assert!(!version_at_least("abc", (1, 5, 0)));
         assert!(!version_at_least("99999999999999999999.1", (1, 5, 0)));
-        assert!(!version_at_least("1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1", (1, 5, 0)));
+        assert!(!version_at_least(
+            "1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1",
+            (1, 5, 0)
+        ));
     }
 
     #[test]
@@ -1107,29 +1250,62 @@ mod tests {
     fn unanswered_offers_are_dropped_from_the_third_request() {
         let routes = PunchRoutes::default();
         let key = || Some(FP.to_owned());
-        assert!(routes.open(ctl(1), "peer01", peer_ip(), want(false, false), key()).webrtc);
-        assert!(routes.open(ctl(1), "peer01", peer_ip(), want(false, false), key()).webrtc);
-        assert!(!routes.open(ctl(1), "peer01", peer_ip(), want(false, false), key()).webrtc);
+        assert!(
+            routes
+                .open(ctl(1), "peer01", peer_ip(), want(false, false), key())
+                .webrtc
+        );
+        assert!(
+            routes
+                .open(ctl(1), "peer01", peer_ip(), want(false, false), key())
+                .webrtc
+        );
+        assert!(
+            !routes
+                .open(ctl(1), "peer01", peer_ip(), want(false, false), key())
+                .webrtc
+        );
         // the route itself stays, for a late answer and its candidates
         assert!(routes.keeps_sink(ctl(1)));
         // once the peer has replied, re-sent requests keep the offer
         routes.open(ctl(2), "peer01", peer_ip(), want(false, false), key());
         routes.replied(ctl(2));
         for _ in 0..5 {
-            assert!(routes.open(ctl(2), "peer01", peer_ip(), want(false, false), key()).webrtc);
+            assert!(
+                routes
+                    .open(ctl(2), "peer01", peer_ip(), want(false, false), key())
+                    .webrtc
+            );
         }
     }
 
     #[test]
     fn route_limit_counts_an_ipv6_prefix_as_one_controller() {
         let routes = PunchRoutes::default();
-        let v6 = |i: u16| SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, i)), 1);
+        let v6 = |i: u16| {
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, i)),
+                1,
+            )
+        };
         for i in 0..MAX_ROUTES_PER_IP as u16 {
-            assert!(routes.open(v6(i + 1), "peer01", peer_ip(), want(true, false), None).udp);
+            assert!(
+                routes
+                    .open(v6(i + 1), "peer01", peer_ip(), want(true, false), None)
+                    .udp
+            );
         }
-        assert!(!routes.open(v6(999), "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            !routes
+                .open(v6(999), "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         let other = SocketAddr::new("2001:db8:0:2::1".parse().unwrap(), 1);
-        assert!(routes.open(other, "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            routes
+                .open(other, "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
     }
 
     #[test]
@@ -1138,7 +1314,14 @@ mod tests {
         let t0 = Instant::now();
         // one source at its cap, the rest of the table from single-route sources
         for port in 0..MAX_ROUTES_PER_IP as u16 {
-            routes.open_at(t0 + Duration::from_millis(port as u64), ctl(port), "peer01", peer_ip(), want(true, false), None);
+            routes.open_at(
+                t0 + Duration::from_millis(port as u64),
+                ctl(port),
+                "peer01",
+                peer_ip(),
+                want(true, false),
+                None,
+            );
         }
         let mut n = MAX_ROUTES_PER_IP;
         'fill: for a in 0..=255u8 {
@@ -1147,12 +1330,20 @@ mod tests {
                     break 'fill;
                 }
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, a, b)), 1);
-                assert!(routes.open_at(t0, addr, "peer01", peer_ip(), want(true, false), None).udp);
+                assert!(
+                    routes
+                        .open_at(t0, addr, "peer01", peer_ip(), want(true, false), None)
+                        .udp
+                );
                 n += 1;
             }
         }
         let newcomer = SocketAddr::new("10.2.0.1".parse().unwrap(), 1);
-        assert!(routes.open_at(t0, newcomer, "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            routes
+                .open_at(t0, newcomer, "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         assert_eq!(routes.len(), MAX_ROUTES);
         // the heavy source's oldest route went
         assert!(!routes.claim_udp_at(t0, ctl(0), "peer01", SocketAddr::new(peer_ip(), 1)));
@@ -1170,16 +1361,28 @@ mod tests {
                 n += 1;
             }
         }
-        assert!(!routes.open_at(t0, newcomer, "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            !routes
+                .open_at(t0, newcomer, "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
     }
 
     #[test]
     fn routes_are_bounded() {
         let routes = PunchRoutes::default();
         for port in 0..MAX_ROUTES_PER_IP as u16 {
-            assert!(routes.open(ctl(port), "peer01", peer_ip(), want(true, false), None).udp);
+            assert!(
+                routes
+                    .open(ctl(port), "peer01", peer_ip(), want(true, false), None)
+                    .udp
+            );
         }
-        assert!(!routes.open(ctl(9999), "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            !routes
+                .open(ctl(9999), "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         let mut n = MAX_ROUTES_PER_IP;
         'fill: for a in 0..=255u8 {
             for b in 0..=255u8 {
@@ -1187,21 +1390,37 @@ mod tests {
                     break 'fill;
                 }
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, a, b)), 1);
-                assert!(routes.open(addr, "peer01", peer_ip(), want(true, false), None).udp);
+                assert!(
+                    routes
+                        .open(addr, "peer01", peer_ip(), want(true, false), None)
+                        .udp
+                );
                 n += 1;
             }
         }
         assert_eq!(routes.len(), MAX_ROUTES);
         // full: a newcomer takes the oldest route of the heaviest source (10.0.0.1)
         let late = SocketAddr::new("10.2.0.1".parse().unwrap(), 1);
-        assert!(routes.open(late, "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            routes
+                .open(late, "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         assert_eq!(routes.len(), MAX_ROUTES);
         // the heavy source itself cannot take a slot back
-        assert!(!routes.open(ctl(9999), "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            !routes
+                .open(ctl(9999), "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         // expired routes make room again
         let later = Instant::now() + MAX_ROUTE_LIFETIME;
         let fresh = SocketAddr::new("10.2.0.2".parse().unwrap(), 1);
-        assert!(routes.open_at(later, fresh, "peer01", peer_ip(), want(true, false), None).udp);
+        assert!(
+            routes
+                .open_at(later, fresh, "peer01", peer_ip(), want(true, false), None)
+                .udp
+        );
         assert_eq!(routes.len(), 1);
     }
 }

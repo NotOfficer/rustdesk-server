@@ -15,7 +15,11 @@ use std::net::SocketAddr;
 fn baseline_bin() -> String {
     let bin = std::env::var("HBBS_BASELINE_BIN")
         .expect("set HBBS_BASELINE_BIN to the original hbbs binary");
-    assert!(std::path::Path::new(&bin).exists(), "{} does not exist", bin);
+    assert!(
+        std::path::Path::new(&bin).exists(),
+        "{} does not exist",
+        bin
+    );
     bin
 }
 
@@ -113,11 +117,22 @@ impl<'a> Observer<'a> {
 
 const RELAY: &str = "relay.example:21117";
 
-async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHoleRequest)) -> Vec<String> {
-    let mut o = Observer { hbbs, roles: vec![], lines: vec![] };
+async fn old_style_transcript(
+    hbbs: &Hbbs,
+    version: &str,
+    extra: fn(&mut PunchHoleRequest),
+) -> Vec<String> {
+    let mut o = Observer {
+        hbbs,
+        roles: vec![],
+        lines: vec![],
+    };
     let peer = Peer::register(hbbs, "peer01").await;
     peer.send(&msg(|m| {
-        m.set_register_peer(RegisterPeer { id: "peer01".to_owned(), ..Default::default() })
+        m.set_register_peer(RegisterPeer {
+            id: "peer01".to_owned(),
+            ..Default::default()
+        })
     }))
     .await;
     o.note("register peer", peer.recv(2000).await.and_then(|m| m.union));
@@ -130,15 +145,20 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
 
     // unknown id
     let mut ctl = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
-    ctl.send(&msg(|m| m.set_punch_hole_request(req("nobody1")))).await;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req("nobody1"))))
+        .await;
     o.note("unknown id", ctl.recv(3000).await.and_then(|m| m.union));
 
     // TCP punch, the controlled side answers on a new plaintext connection
     let mut ctl = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
     o.roles.push((ctl.local_addr(), "controller"));
-    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01")))).await;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01"))))
+        .await;
     let ph = peer.expect(3000, pick_punch_hole).await;
-    o.note("punch hole", ph.clone().map(rendezvous_message::Union::PunchHole));
+    o.note(
+        "punch hole",
+        ph.clone().map(rendezvous_message::Union::PunchHole),
+    );
     if let Some(ph) = ph {
         let mut reply = Tcp::connect(hbbs, PEER_IP, Kx::None).await;
         o.roles.push((reply.local_addr(), "peer tcp"));
@@ -155,15 +175,22 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
             }))
             .await;
         drop(reply);
-        o.note("punch hole response", ctl.recv(3000).await.and_then(|m| m.union));
+        o.note(
+            "punch hole response",
+            ctl.recv(3000).await.and_then(|m| m.union),
+        );
     }
 
     // same intranet: LocalAddr
     let mut ctl = Tcp::connect(hbbs, PEER_IP, Kx::None).await;
     o.roles.push((ctl.local_addr(), "controller lan"));
-    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01")))).await;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01"))))
+        .await;
     let fla = peer.expect(3000, pick_fetch_local_addr).await;
-    o.note("fetch local addr", fla.clone().map(rendezvous_message::Union::FetchLocalAddr));
+    o.note(
+        "fetch local addr",
+        fla.clone().map(rendezvous_message::Union::FetchLocalAddr),
+    );
     if let Some(fla) = fla {
         let mut reply = Tcp::connect(hbbs, PEER_IP, Kx::None).await;
         let local = reply.local_addr();
@@ -181,13 +208,17 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
             }))
             .await;
         drop(reply);
-        o.note("local addr response", ctl.recv(3000).await.and_then(|m| m.union));
+        o.note(
+            "local addr response",
+            ctl.recv(3000).await.and_then(|m| m.union),
+        );
     }
 
     // the controlled side relays instead (create_relay with initiate)
     let mut ctl = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
     o.roles.push((ctl.local_addr(), "controller 2"));
-    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01")))).await;
+    ctl.send(&msg(|m| m.set_punch_hole_request(req("peer01"))))
+        .await;
     if let Some(ph) = peer.expect(3000, pick_punch_hole).await {
         let mut reply = Tcp::connect(hbbs, PEER_IP, Kx::None).await;
         let mut rr = RelayResponse {
@@ -219,7 +250,9 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
     o.note(
         "request relay",
         peer.expect(3000, |u| match u {
-            rendezvous_message::Union::RequestRelay(r) => Some(rendezvous_message::Union::RequestRelay(r)),
+            rendezvous_message::Union::RequestRelay(r) => {
+                Some(rendezvous_message::Union::RequestRelay(r))
+            }
             _ => None,
         })
         .await,
@@ -228,7 +261,10 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
     // NAT type test over TCP, as test_nat_type_ sends it
     let mut tcp = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
     tcp.send(&msg(|m| {
-        m.set_test_nat_request(TestNatRequest { serial: 0, ..Default::default() })
+        m.set_test_nat_request(TestNatRequest {
+            serial: 0,
+            ..Default::default()
+        })
     }))
     .await;
     o.note("tcp nat test", tcp.recv(3000).await.and_then(|m| m.union));
@@ -237,12 +273,18 @@ async fn old_style_transcript(hbbs: &Hbbs, version: &str, extra: fn(&mut PunchHo
     // which every client skips (get_next_nonkeyexchange_msg)
     let mut slow = Tcp::connect(hbbs, CONTROLLER_IP, Kx::None).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    slow.send(&msg(|m| m.set_punch_hole_request(req("nobody1")))).await;
+    slow.send(&msg(|m| m.set_punch_hole_request(req("nobody1"))))
+        .await;
     o.note("slow client", slow.recv(3000).await.and_then(|m| m.union));
     o.lines
 }
 
-async fn compare(baseline: &str, modern_envs: &[(&str, &str)], version: &str, extra: fn(&mut PunchHoleRequest)) {
+async fn compare(
+    baseline: &str,
+    modern_envs: &[(&str, &str)],
+    version: &str,
+    extra: fn(&mut PunchHoleRequest),
+) {
     let a = Hbbs::start_bin(baseline, &[], &["-r", RELAY]).await;
     let old = old_style_transcript(&a, version, extra).await;
     drop(a);
@@ -251,7 +293,11 @@ async fn compare(baseline: &str, modern_envs: &[(&str, &str)], version: &str, ex
     for (x, y) in old.iter().zip(new.iter()) {
         println!("original: {}\nmodern:   {}", x, y);
     }
-    assert_eq!(old, new, "modern {:?} differs from the original", modern_envs);
+    assert_eq!(
+        old, new,
+        "modern {:?} differs from the original",
+        modern_envs
+    );
 }
 
 const ALL_OFF: [(&str, &str); 4] = [
