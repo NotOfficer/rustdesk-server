@@ -311,12 +311,20 @@ otherwise bypass the forced relay.
 
 ## 3. Security design
 
-### 3.1 No new UDP reflection or amplification (CVE-2026-30784, issue #670)
+### 3.1 UDP: one small, rate-limited reply (CVE-2026-30784, issue #670)
 
 The original server answered several UDP messages with traffic to addresses
 taken from the packet, which made it a reflector. 1.1.16 removed those paths.
-The new UDP handling is built so that a spoofed UDP packet cannot make hbbs
-send more, or anything to a third address.
+
+The new UDP handling adds exactly one reply to an address taken from a
+packet: the answer to the UDP NAT test. UDP hole punching cannot do without
+it, because the client learns its public UDP port from it, as it would from
+a STUN server. Like a STUN answer, it goes to the packet's source address, so
+a spoofed source makes hbbs send it to the spoofed address. That reflection
+is bounded as described below: one packet per packet, at most ~1.15x the
+bytes, and at most 30 answers per second (burst 60) to one address (IPv6:
+one /64), which is about 1 KB/s. Nothing else in the new UDP handling sends
+to an address taken from a packet, and `UDP_PUNCH=N` removes the reply.
 
 * **UDP `TestNatRequest`** is the only new UDP message that gets a UDP reply.
   * The reply goes only to the packet's source address. It is
@@ -449,7 +457,7 @@ be abused to make a peer send packets to a third host:
 | 1.4.1 – 1.4.9 | as controller: no WebRTC, and its `udp_port` and `socket_addr_v6` are not forwarded (see 1.4 and 1.5), so it connects exactly as with the original server; the exchange runs as v0. As controlled side: once it has replied with its version (a `PunchHoleSent`, `LocalAddr` or `RelayResponse` to a waiting controller, sent from its registered host over plain TCP or a claimed UDP route; never over WebSocket, whose address can come from a header), hbbs remembers it in memory and sends it no `udp_port` and no IPv6 address, so it does its TCP punch as with the original server. Only before its first reply after a server start can it get them, or always if its replies leave from another IP than its registration (multi-WAN, NAT pool without paired addresses); it then punches UDP with probes 1.5.0 does not answer (`RDP?`/`RDP!` came with 1.5.0), that round ends on the relay after ~3 s, and the controller's parallel TCP round usually wins first. WebRTC offers are ignored by it; the controller falls back. |
 | 1.4.0 | knows none of the new fields; they are not sent to it in a way it can misread. The exchange runs as v0 when it is signed in. |
 | older | not tested; the unsolicited `KeyExchange` is skipped by every client that reads responses with `get_next_nonkeyexchange_msg` |
-| all options off | exactly as before: plain `PunchHoleRequest`, TCP punch or relay |
+| all options off | as before: plain `PunchHoleRequest`, TCP punch or relay (the server's 64 KiB frame limit applies to every client) |
 
 Behavior changes that are improvements, not regressions:
 
