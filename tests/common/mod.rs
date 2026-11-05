@@ -53,8 +53,10 @@ impl Drop for PortLock {
 
 fn free_port() -> (u16, PortLock) {
     let dir = std::env::temp_dir().join("hbbs-test-ports");
-    std::fs::create_dir_all(&dir).ok();
-    loop {
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        panic!("cannot create {}: {}", dir.display(), err);
+    }
+    for _ in 0..1000 {
         let port = 20_001 + 4 * (rand_u32() % 10_000) as u16;
         let path = dir.join(port.to_string());
         let stale = std::fs::metadata(&path)
@@ -77,6 +79,11 @@ fn free_port() -> (u16, PortLock) {
             return (port, lock);
         }
     }
+    panic!(
+        "no free port block in 1000 tries; the tests need TCP and UDP on [::] \
+         and lock files in {}",
+        dir.display()
+    );
 }
 
 fn rand_u32() -> u32 {

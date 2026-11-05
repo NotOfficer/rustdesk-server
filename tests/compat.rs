@@ -1,10 +1,18 @@
 // Differential test against the original hbbs: the same old-style message
 // sequences (no new fields, as clients up to 1.5.0 send them with UDP, IPv6
 // and WebRTC off) go to the original binary and to this one, and the observed
-// replies must be the same. The tests need the original hbbs (upstream
-// 873230e) and are therefore ignored by a plain `cargo test`:
-//   HBBS_BASELINE_BIN=/path/to/original/hbbs cargo test --test compat -- --ignored
-// lab/run-all-tests.sh builds that binary and runs them.
+// replies must be the same. The tests need an hbbs built from the commit
+// before these connection types (08cd442) and are therefore ignored by a
+// plain `cargo test`:
+//   git worktree add ../hbbs-original 08cd442
+//   (cd ../hbbs-original && git submodule update --init --recursive \
+//     && cargo build --release)
+//   HBBS_BASELINE_BIN=../hbbs-original/target/release/hbbs \
+//     cargo test --test compat -- --ignored
+// They pin that commit's behaviour, so an intended later change to the
+// old-style replies makes them fail; update or drop them then.
+// lab/run-all-tests.sh runs them against 873230e, the commit before the
+// relay UUID check; with the valid UUIDs sent here both give the same replies.
 mod common;
 
 use common::*;
@@ -15,12 +23,9 @@ use std::net::SocketAddr;
 fn baseline_bin() -> String {
     let bin = std::env::var("HBBS_BASELINE_BIN")
         .expect("set HBBS_BASELINE_BIN to the original hbbs binary");
-    assert!(
-        std::path::Path::new(&bin).exists(),
-        "{} does not exist",
-        bin
-    );
-    bin
+    // hbbs runs in a temporary directory, where a relative path would not resolve
+    let path = std::fs::canonicalize(&bin).unwrap_or_else(|err| panic!("{}: {}", bin, err));
+    path.to_string_lossy().into_owned()
 }
 
 /// What a client could observe, with addresses replaced by roles and
