@@ -182,3 +182,20 @@ but only the port itself was locked, so two tests starting at once could
 share a port through SO_REUSEPORT. `6110463` picks ports in aligned blocks
 of four. This is a likely cause of the one sporadic comparison test failure
 seen earlier.
+
+## Upstream PR review (rustdesk/rustdesk-server#734)
+
+The PR carries the code of this branch without the lab and these notes. Bots
+reviewed it after the rebase onto upstream `08cd442` and the hbb_common bump
+to `fae47e0` (client 1.5.1); the fixes came back here with `cherry-pick -x`.
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| PR-1 (Greptile) | `write_sink` encrypted a frame before the sink had room. A write cancelled by `SINK_SEND_TIMEOUT` in between used up a nonce without sending the frame, so the controller could decrypt nothing after it. | Valid (major), reproduced | `8d8c7a4`: wait for room, then encrypt and queue the frame at once. Test `a_timed_out_write_keeps_later_frames_decryptable`. |
+| PR-2 (CodeRabbit) | The docs said WebRTC needs the key on both sides without saying why for the controlled side; the ICE row and the untrusted-input list were vague. | Valid (docs) | `1f165c5`: the controlled side needs the key for its TCP answer and its own candidates; the ICE row lists every dropped frame; `punch::decode_addr` named as the checked decode. |
+| PR-3 (CodeRabbit) | The compat transcript printed `pk` and `RequestRelay` without the signed key and `secure`, so a change there would not show. | Valid (tests) | `e17ae53`: the transcript compares the signed id and key, and `secure`. |
+| PR-4 (CodeRabbit) | The compat slow client slept a fixed time before it sent, which depended on timing. | Valid (tests) | `45d21ce`, `48448e8`: it waits for the `KeyExchange` offer where the server sends one, and past the offer delay where it does not. |
+
+OPUS-4's workaround (`2c63b33`, own `send_udp`) is gone since `21e4580`:
+hbb_common `fae47e0` includes rustdesk/hbb_common#628, so the framed socket
+keeps no failed datagram and later sends are not blocked.
